@@ -277,6 +277,12 @@ window.addEventListener("DOMContentLoaded", () => {
           <h3>Sin diferencias calculadas</h3>
           <p>Haz click en "Calcular Cambios" para contrastar el diseño.</p>
         </div>`;
+      document.getElementById("pcb-canvas-container").innerHTML = `
+        <div class="empty-state">
+          <span class="empty-icon">🖥️</span>
+          <h3>PCB sin renderizar</h3>
+          <p>Calcula los cambios para ver el renderizado interactivo antes/después del hardware.</p>
+        </div>`;
       pushLogEl.style.display = "none";
       pushMessageEl.value = "";
 
@@ -291,8 +297,9 @@ window.addEventListener("DOMContentLoaded", () => {
     btnRunDiff.textContent = "⌛ Analizando...";
     
     try {
-      const diff = await invoke("calculate_diff", { dir: currentDir });
-      renderDiff(diff);
+      const payload = await invoke("calculate_diff", { dir: currentDir });
+      renderDiff(payload.diff);
+      renderPcb(payload.old_design, payload.new_design, payload.diff);
     } catch (error) {
       diffResultsEl.innerHTML = `
         <div class="empty-state">
@@ -344,3 +351,171 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
 });
+
+function getComponentPos(designator) {
+  const type = designator.charAt(0);
+  const num = parseInt(designator.substring(1)) || 1;
+  let x = 100, y = 100;
+  if (type === 'U') {
+    x = 150 + (num * 100);
+    y = 200;
+  } else if (type === 'R') {
+    x = 420;
+    y = 80 + (num * 65);
+  } else if (type === 'C') {
+    x = 540;
+    y = 80 + (num * 65);
+  } else {
+    x = 250;
+    y = 330 + (num * 50);
+  }
+  return { x, y };
+}
+
+function getPinOffset(pinId, compWidth = 40, compHeight = 40) {
+  const pin = parseInt(pinId) || 1;
+  if (pin % 2 === 1) {
+    return { x: -compWidth/2, y: 0 };
+  } else {
+    return { x: compWidth/2, y: 0 };
+  }
+}
+
+function renderPinsSvg(designator, x, y, w, h) {
+  const type = designator.charAt(0);
+  let pinsHtml = "";
+  if (type === 'U') {
+    for (let i = 0; i < 4; i++) {
+      pinsHtml += `<rect x="${x - w/2 - 6}" y="${y - h/2 + 8 + i*14}" width="6" height="4" class="component-pin" />`;
+      pinsHtml += `<rect x="${x + w/2}" y="${y - h/2 + 8 + i*14}" width="6" height="4" class="component-pin" />`;
+    }
+  } else {
+    pinsHtml += `<rect x="${x - w/2 - 4}" y="${y - 2}" width="4" height="4" class="component-pin" />`;
+    pinsHtml += `<rect x="${x + w/2}" y="${y - 2}" width="4" height="4" class="component-pin" />`;
+  }
+  return pinsHtml;
+}
+
+function renderPcb(old_design, new_design, diff) {
+  const components = {};
+  
+  if (old_design && old_design.components) {
+    Object.keys(old_design.components).forEach(des => {
+      components[des] = {
+        designator: des,
+        status: 'deleted',
+        details: old_design.components[des]
+      };
+    });
+  }
+  
+  if (new_design && new_design.components) {
+    Object.keys(new_design.components).forEach(des => {
+      if (components[des]) {
+        const isModified = diff.components.modified[des] !== undefined;
+        components[des].status = isModified ? 'modified' : 'normal';
+        components[des].details = new_design.components[des];
+      } else {
+        components[des] = {
+          designator: des,
+          status: 'added',
+          details: new_design.components[des]
+        };
+      }
+    });
+  }
+
+  let svgContent = `
+    <svg class="pcb-svg" viewBox="0 0 650 450" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <pattern id="grid-pattern" width="20" height="20" patternUnits="userSpaceOnUse">
+          <path d="M 20 0 L 0 0 0 20" fill="none" stroke="rgba(255,255,255,0.015)" stroke-width="1" />
+        </pattern>
+      </defs>
+      
+      <rect x="10" y="10" width="630" height="430" class="pcb-board" />
+      <rect x="10" y="10" width="630" height="430" fill="url(#grid-pattern)" rx="15" />
+  `;
+
+  // Dibujar Pistas (Nets)
+  const allNets = new Set([
+    ...Object.keys((old_design && old_design.nets) || {}),
+    ...Object.keys(new_design.nets || {})
+  ]);
+
+  allNets.forEach(netName => {
+    const isAdded = diff.nets.added[netName] !== undefined;
+    const isDeleted = diff.nets.deleted[netName] !== undefined;
+    
+    const netDetails = new_design.nets[netName] || (old_design && old_design.nets[netName]);
+    if (!netDetails) return;
+
+    const endpoints = netDetails.endpoints || [];
+    if (endpoints.length > 1) {
+      for (let i = 0; i < endpoints.length - 1; i++) {
+        const des1 = endpoints[i].component_designator;
+        const des2 = endpoints[i+1].component_designator;
+        
+        const p1 = getComponentPos(des1);
+        const p2 = getComponentPos(des2);
+        
+        // Component shape sizes for pin offset
+        let w1 = 40, h1 = 40;
+        if (des1.charAt(0) === 'U') { w1 = 60; h1 = 60; }
+        else if (des1.charAt(0) === 'R') { w1 = 30; h1 = 18; }
+        else if (des1.charAt(0) === 'C') { w1 = 24; h1 = 24; }
+
+        let w2 = 40, h2 = 40;
+        if (des2.charAt(0) === 'U') { w2 = 60; h2 = 60; }
+        else if (des2.charAt(0) === 'R') { w2 = 30; h2 = 18; }
+        else if (des2.charAt(0) === 'C') { w2 = 24; h2 = 24; }
+
+        const offset1 = getPinOffset(endpoints[i].pin_id, w1, h1);
+        const offset2 = getPinOffset(endpoints[i+1].pin_id, w2, h2);
+        
+        const x1 = p1.x + offset1.x;
+        const y1 = p1.y + offset1.y;
+        const x2 = p2.x + offset2.x;
+        const y2 = p2.y + offset2.y;
+
+        const dx = x2 - x1;
+        const dy = y2 - y1;
+        
+        // Draw track with a nice 45-degree angle in the center
+        if (Math.abs(dx) > 30 && Math.abs(dy) > 30) {
+          const midX = x1 + dx / 2;
+          svgContent += `<path d="M ${x1} ${y1} L ${midX} ${y1} L ${x2} ${y2}" class="pcb-trace ${isAdded ? 'added' : (isDeleted ? 'deleted' : '')}" />`;
+        } else {
+          svgContent += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" class="pcb-trace ${isAdded ? 'added' : (isDeleted ? 'deleted' : '')}" />`;
+        }
+      }
+    }
+  });
+
+  // Dibujar Componentes
+  Object.keys(components).forEach(des => {
+    const comp = components[des];
+    const { x, y } = getComponentPos(des);
+    
+    let w = 40, h = 40;
+    const type = des.charAt(0);
+    if (type === 'U') { w = 60; h = 60; }
+    else if (type === 'R') { w = 30; h = 18; }
+    else if (type === 'C') { w = 24; h = 24; }
+
+    const rx = x - w/2;
+    const ry = y - h/2;
+
+    svgContent += `
+      <g class="pcb-component" id="comp-${des}">
+        <rect x="${rx}" y="${ry}" width="${w}" height="${h}" class="component-body ${comp.status}" />
+        ${renderPinsSvg(des, x, y, w, h)}
+        <text x="${x}" y="${y}" class="component-text">${des}</text>
+        <title>${des}: ${comp.details.mpn || "Genérico"}\nEstado: ${comp.status.toUpperCase()}</title>
+      </g>
+    `;
+  });
+
+  svgContent += `</svg>`;
+  document.getElementById("pcb-canvas-container").innerHTML = svgContent;
+}

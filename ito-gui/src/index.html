@@ -76,12 +76,34 @@
             </button>
           </header>
 
-          <div class="diff-container">
-            <div id="diff-results" class="diff-results-panel">
-              <div class="empty-state">
-                <span class="empty-icon">🔍</span>
-                <h3>Sin diferencias calculadas</h3>
-                <p>Selecciona un proyecto de hardware y haz click en "Calcular Cambios" para ver el análisis semántico de PCB y BOM.</p>
+          <div class="diff-split-layout">
+            <!-- Columna Izquierda: Resultados de Texto y Cambios -->
+            <div class="diff-container">
+              <div id="diff-results" class="diff-results-panel">
+                <div class="empty-state">
+                  <span class="empty-icon">🔍</span>
+                  <h3>Sin diferencias calculadas</h3>
+                  <p>Selecciona un proyecto de hardware y haz click en "Calcular Cambios" para ver el análisis semántico de PCB y BOM.</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Columna Derecha: Visualizador Gráfico de la PCB -->
+            <div class="pcb-viewer-container">
+              <div class="pcb-viewer-header">
+                <h3>🖥️ Visualizador Semántico de PCB</h3>
+                <div class="pcb-viewer-legend">
+                  <span class="legend-item"><span class="legend-dot added"></span>Añadido</span>
+                  <span class="legend-item"><span class="legend-dot deleted"></span>Eliminado</span>
+                  <span class="legend-item"><span class="legend-dot modified"></span>Modificado</span>
+                </div>
+              </div>
+              <div id="pcb-canvas-container" class="pcb-canvas-wrapper">
+                <div class="empty-state">
+                  <span class="empty-icon">🖥️</span>
+                  <h3>PCB sin renderizar</h3>
+                  <p>Calcula los cambios para ver el renderizado interactivo antes/después del hardware.</p>
+                </div>
               </div>
             </div>
           </div>

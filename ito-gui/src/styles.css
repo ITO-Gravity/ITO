@@ -535,3 +535,170 @@ body {
   background-color: var(--color-warn-bg);
   color: var(--color-warn);
 }
+
+.diff-split-layout {
+  display: flex;
+  gap: 20px;
+  flex-grow: 1;
+  overflow: hidden;
+  margin-bottom: 24px;
+}
+
+.diff-container {
+  flex: 1;
+  overflow-y: auto;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-glass);
+  background: var(--bg-card);
+  padding: 24px;
+  margin-bottom: 0 !important;
+}
+
+.pcb-viewer-container {
+  flex: 1.2;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-glass);
+  background: #0f111a;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: hidden;
+  position: relative;
+}
+
+.pcb-viewer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.pcb-viewer-header h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.pcb-viewer-legend {
+  display: flex;
+  gap: 12px;
+}
+
+.legend-item {
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.legend-dot.added { background-color: var(--color-success); }
+.legend-dot.deleted { background-color: var(--color-error); }
+.legend-dot.modified { background-color: var(--color-warn); }
+
+.pcb-canvas-wrapper {
+  flex-grow: 1;
+  border-radius: var(--radius-md);
+  background-color: #08090f;
+  border: 1px solid var(--border-glass);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+}
+
+.pcb-svg {
+  width: 100%;
+  height: 100%;
+  user-select: none;
+}
+
+.pcb-board {
+  fill: #111422;
+  stroke: #1b2038;
+  stroke-width: 2px;
+  rx: 15px;
+}
+
+.pcb-grid {
+  stroke: rgba(255, 255, 255, 0.015);
+  stroke-width: 1px;
+}
+
+.pcb-component {
+  cursor: pointer;
+  transition: opacity var(--transition-fast);
+}
+
+.pcb-component:hover {
+  opacity: 0.85;
+}
+
+.component-body {
+  fill: #1a1e36;
+  stroke: #2e355c;
+  stroke-width: 1.5px;
+  rx: 6px;
+  transition: all var(--transition-fast);
+}
+
+.component-body.added {
+  fill: rgba(16, 185, 129, 0.08);
+  stroke: var(--color-success);
+  filter: drop-shadow(0 0 4px rgba(16, 185, 129, 0.2));
+}
+
+.component-body.deleted {
+  fill: rgba(239, 68, 68, 0.05);
+  stroke: var(--color-error);
+  stroke-dasharray: 4 4;
+}
+
+.component-body.modified {
+  fill: rgba(245, 158, 11, 0.08);
+  stroke: var(--color-warn);
+}
+
+.component-text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: bold;
+  fill: var(--text-primary);
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+.component-pin {
+  fill: #475569;
+  stroke: none;
+  rx: 2px;
+}
+
+.pcb-trace {
+  fill: none;
+  stroke: rgba(6, 182, 212, 0.2);
+  stroke-width: 1.5px;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: all var(--transition-fast);
+}
+
+.pcb-trace.added {
+  stroke: var(--color-success);
+  stroke-width: 2.5px;
+  filter: drop-shadow(0 0 3px rgba(16, 185, 129, 0.3));
+}
+
+.pcb-trace.deleted {
+  stroke: var(--color-error);
+  stroke-width: 2px;
+  stroke-dasharray: 3 3;
+}

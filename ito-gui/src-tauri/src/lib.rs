@@ -66,8 +66,15 @@ fn load_project_status(dir: String) -> Result<ProjectStatus, String> {
     })
 }
 
+#[derive(serde::Serialize)]
+pub struct DesignsPayload {
+    old_design: Option<ito::models::HardwareDesign>,
+    new_design: ito::models::HardwareDesign,
+    diff: ito::diff::DesignDiff,
+}
+
 #[tauri::command]
-fn calculate_diff(dir: String) -> Result<ito::diff::DesignDiff, String> {
+fn calculate_diff(dir: String) -> Result<DesignsPayload, String> {
     let path = PathBuf::from(&dir);
     let new_cad = path.join("design.json");
     let new_bom = path.join("bom.csv");
@@ -80,6 +87,7 @@ fn calculate_diff(dir: String) -> Result<ito::diff::DesignDiff, String> {
     let old_cad = cache_dir.join("design.old.json");
     let old_bom = cache_dir.join("bom.old.csv");
 
+    let mut old_design_opt = None;
     let old_design = if old_cad.exists() {
         let mut design = ito::parsers::parse_cad_json(&old_cad)
             .map_err(|e| format!("Error al parsear design.old.json: {}", e))?;
@@ -88,6 +96,7 @@ fn calculate_diff(dir: String) -> Result<ito::diff::DesignDiff, String> {
                 .map_err(|e| format!("Error al parsear bom.old.csv: {}", e))?;
             design.merge_bom(bom);
         }
+        old_design_opt = Some(design.clone());
         design
     } else {
         ito::models::HardwareDesign::new()
@@ -102,7 +111,11 @@ fn calculate_diff(dir: String) -> Result<ito::diff::DesignDiff, String> {
     }
 
     let diff_result = ito::diff::diff_designs(&old_design, &new_design);
-    Ok(diff_result)
+    Ok(DesignsPayload {
+        old_design: old_design_opt,
+        new_design,
+        diff: diff_result,
+    })
 }
 
 #[tauri::command]
