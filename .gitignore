@@ -1,0 +1,12 @@
+# Rust build artifacts
+/target
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local config / environment
+.env
+.env.local
