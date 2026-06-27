@@ -70,16 +70,30 @@ impl DesignDiff {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RawFiles {
+    pub design_json: String,
+    pub bom_csv: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ItoReport {
     pub project_id: String,
     pub domain: String,
     pub timestamp: String,
     pub ito_version: String,
     pub diff: DesignDiff,
+    pub design: HardwareDesign,
+    pub raw_files: RawFiles,
 }
 
 impl ItoReport {
-    pub fn new(project_id: String, diff: DesignDiff) -> Self {
+    pub fn new(
+        project_id: String,
+        diff: DesignDiff,
+        design: HardwareDesign,
+        design_json: String,
+        bom_csv: Option<String>,
+    ) -> Self {
         let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         Self {
             project_id,
@@ -87,6 +101,11 @@ impl ItoReport {
             timestamp,
             ito_version: env!("CARGO_PKG_VERSION").to_string(),
             diff,
+            design,
+            raw_files: RawFiles {
+                design_json,
+                bom_csv,
+            },
         }
     }
 }
@@ -384,7 +403,13 @@ mod tests {
         let new_design = HardwareDesign::new();
         let diff = diff_designs(&old_design, &new_design);
         
-        let report = ItoReport::new("test-project-123".to_string(), diff);
+        let report = ItoReport::new(
+            "test-project-123".to_string(),
+            diff,
+            new_design,
+            "{}".to_string(),
+            None,
+        );
         let json_str = serde_json::to_string(&report).unwrap();
         
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();

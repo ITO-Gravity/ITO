@@ -154,7 +154,21 @@ async fn main() -> Result<()> {
                     .and_then(|n| n.to_str())
                     .unwrap_or("ito-project")
                     .to_string();
-                let report = diff::ItoReport::new(project_id, diff_result);
+
+                let design_json_content = std::fs::read_to_string(&new_cad)?;
+                let bom_csv_content = if new_bom.exists() {
+                    Some(std::fs::read_to_string(&new_bom)?)
+                } else {
+                    None
+                };
+
+                let report = diff::ItoReport::new(
+                    project_id,
+                    diff_result,
+                    new_design,
+                    design_json_content,
+                    bom_csv_content,
+                );
                 let json_output = serde_json::to_string_pretty(&report)?;
                 println!("{}", json_output);
                 return Ok(());
@@ -413,7 +427,21 @@ async fn main() -> Result<()> {
 
             // 5. Comparar y armar reporte
             let diff_result = diff::diff_designs(&old_design, &new_design);
-            let report = diff::ItoReport::new(config.project_id.clone(), diff_result);
+
+            let design_json_content = std::fs::read_to_string(&new_cad)?;
+            let bom_csv_content = if new_bom.exists() {
+                Some(std::fs::read_to_string(&new_bom)?)
+            } else {
+                None
+            };
+
+            let report = diff::ItoReport::new(
+                config.project_id.clone(),
+                diff_result,
+                new_design,
+                design_json_content,
+                bom_csv_content,
+            );
 
             println!("Enviando reporte semántico a Alexandria-HQ ({})...", config.remote_url);
 
