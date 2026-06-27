@@ -13,103 +13,46 @@
 
   <body>
     <div class="app-layout">
-      <!-- Sidebar Estilo Alexandria-HQ -->
-      <aside class="sidebar">
-        <!-- Selector de Cuenta / Organización -->
-        <div class="org-selector">
-          <div class="org-avatar">V</div>
-          <span class="org-name">Vasloth</span>
-          <span class="chevron">▾</span>
-        </div>
-
-        <!-- Sección de Proyectos -->
-        <div class="sidebar-section">
-          <div class="section-header">
-            <span class="section-title">MIS PROYECTOS</span>
-            <button id="btn-select-folder" class="btn-action">+ Proyecto</button>
+      <!-- Main Content Area -->
+      <main class="main-content">
+        <!-- Cabecera del Cliente Local -->
+        <header class="client-header">
+          <div class="header-logo">
+            <span class="logo-icon">⚙️</span>
+            <span class="logo-text">Ito Local Client</span>
           </div>
-
-          <!-- Selector de Ruta del Proyecto Actual -->
-          <div class="project-selector-wrapper">
+          
+          <div class="project-path-selector">
+            <span class="path-label">Proyecto:</span>
             <div id="selected-path" class="path-display" title="No hay carpeta seleccionada">
               No hay carpeta seleccionada
             </div>
-          </div>
-
-          <!-- Lista de Proyectos Ficticios para Completar UI -->
-          <ul class="projects-list">
-            <li class="project-item active">
-              <span class="project-dot"></span>
-              <span class="project-name-text" id="sidebar-active-project">Vasloth / PRUEBA-ITO</span>
-              <span class="project-badge">PRIV</span>
-            </li>
-            <li class="project-item">
-              <span class="project-dot"></span>
-              <span class="project-name-text">Vasloth / Sensor de Flujo</span>
-              <span class="project-badge">PRIV</span>
-            </li>
-            <li class="project-item">
-              <span class="project-dot"></span>
-              <span class="project-name-text">Vasloth / Sensor De Impacto</span>
-              <span class="project-badge">PUB</span>
-            </li>
-            <li class="project-item">
-              <span class="project-dot"></span>
-              <span class="project-name-text">Vasloth / Sensor de Luz</span>
-              <span class="project-badge">PUB</span>
-            </li>
-            <li class="project-item">
-              <span class="project-dot"></span>
-              <span class="project-name-text">Vasloth / Sensor de Temp.</span>
-              <span class="project-badge">PUB</span>
-            </li>
-          </ul>
-        </div>
-      </aside>
-
-      <!-- Main Content Area -->
-      <main class="main-content">
-        <!-- Cabecera del Proyecto Activo -->
-        <header class="project-header">
-          <div class="breadcrumbs">
-            <span class="breadcrumb-root">Vasloth</span>
-            <span class="divider">/</span>
-            <span class="breadcrumb-current" id="header-project-id">PRUEBA-ITO</span>
-            <span class="project-badge-large">PRIVATE</span>
-          </div>
-          <div class="user-profile">
-            <span class="user-avatar">TR</span>
-            <span class="user-name">Tobias Ryske</span>
-            <span class="chevron">▾</span>
+            <button id="btn-select-folder" class="btn btn-secondary btn-sm">
+              📂 Seleccionar Carpeta
+            </button>
           </div>
         </header>
 
-        <!-- Navegación por Pestañas Planas (Alexandria-HQ) -->
+        <!-- Navegación por Pestañas Planas (Solo Versión y Cambios Locales) -->
         <nav class="project-tabs">
           <button class="tab-item active" id="tab-diff">
-            Brainstorm
+            🔍 Análisis de Cambios
           </button>
           <button class="tab-item" id="tab-history">
-            Versiones
-          </button>
-          <button class="tab-item" disabled>
-            Colaboradores
-          </button>
-          <button class="tab-item" disabled>
-            Manufactura
+            📜 Historial de Versiones
           </button>
         </nav>
 
         <!-- Contenedor de Vistas -->
         <div class="views-container">
-          <!-- Vista de Brainstorm (Diff y Visualizador PCB) -->
+          <!-- Vista de Cambios (Diff y Visualizador PCB) -->
           <section id="view-diff" class="tab-view active">
             <!-- Barra de Acciones de Diff -->
             <div class="action-bar">
               <div class="action-title">
                 <h3>Borrador en vivo</h3>
                 <span class="status-indicator-dot"></span>
-                <span class="status-text">Archivos en vivo</span>
+                <span class="status-text">Archivos de hardware locales</span>
               </div>
               <button id="btn-run-diff" class="btn btn-primary" disabled>
                 ⚡ Calcular Cambios
@@ -124,7 +67,7 @@
                   <div class="empty-state">
                     <span class="empty-icon">🔍</span>
                     <h3>Sin diferencias calculadas</h3>
-                    <p>Selecciona la carpeta de tu proyecto de hardware para contrastar los archivos locales contra el último push.</p>
+                    <p>Selecciona la carpeta de tu proyecto de hardware para contrastar los archivos locales contra el último punto de control.</p>
                   </div>
                 </div>
               </div>
@@ -143,7 +86,7 @@
                   <div class="empty-state">
                     <span class="empty-icon">🖥️</span>
                     <h3>PCB sin renderizar</h3>
-                    <p>Calcula los cambios para visualizar el circuito impreso.</p>
+                    <p>Calcula los cambios para visualizar el circuito impreso de la placa.</p>
                   </div>
                 </div>
               </div>
@@ -181,7 +124,7 @@
           </section>
         </div>
 
-        <!-- Información de Configuración Invisible en Sidebar pero útil en el footer -->
+        <!-- Información de Configuración del Proyecto en el footer -->
         <footer class="project-info-footer">
           <div class="info-item">
             <span class="info-label">Identificador:</span>

@@ -52,8 +52,12 @@ async function refreshProjectStatus() {
     infoProjectIdEl.textContent = status.project_id;
     infoRemoteUrlEl.textContent = status.remote_url || "-";
     infoRemoteUrlEl.title = status.remote_url || "-";
-    document.getElementById("sidebar-active-project").textContent = "Vasloth / " + status.project_id;
-    document.getElementById("header-project-id").textContent = status.project_id;
+    
+    const sidebarProjectEl = document.getElementById("sidebar-active-project");
+    if (sidebarProjectEl) sidebarProjectEl.textContent = "Vasloth / " + status.project_id;
+    
+    const headerProjectEl = document.getElementById("header-project-id");
+    if (headerProjectEl) headerProjectEl.textContent = status.project_id;
 
     // Actualizar estados visuales de archivos
     statusDesignEl.innerHTML = status.design_exists 
