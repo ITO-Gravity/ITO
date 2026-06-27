@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ito Desktop Client</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="/main.js" defer></script>
+  </head>
+
+  <body>
+    <div class="app-layout">
+      <!-- Sidebar / Configuración -->
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-logo">🧵</div>
+          <div class="brand-text">
+            <h2>ITO</h2>
+            <span>Alexandria-HQ™</span>
+          </div>
+        </div>
+
+        <div class="project-selector-panel">
+          <button id="btn-select-folder" class="btn btn-primary btn-block">
+            📂 Seleccionar Proyecto
+          </button>
+          <div id="selected-path" class="path-display" title="No hay carpeta seleccionada">
+            No hay carpeta seleccionada
+          </div>
+        </div>
+
+        <nav class="sidebar-nav">
+          <button class="nav-item active" id="tab-diff">
+            <span class="nav-icon">🔍</span> Diff Semántico
+          </button>
+          <button class="nav-item" id="tab-history">
+            <span class="nav-icon">📜</span> Historial Local
+          </button>
+        </nav>
+
+        <div class="project-info-card">
+          <h4>INFORMACIÓN</h4>
+          <div class="info-row">
+            <span class="info-label">Proyecto:</span>
+            <span class="info-value" id="info-project-id">-</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Servidor:</span>
+            <span class="info-value" id="info-remote-url" title="-">-</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">design.json:</span>
+            <span class="info-value status-dot" id="status-design">🔴 Ausente</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">bom.csv:</span>
+            <span class="info-value status-dot" id="status-bom">🔴 Ausente</span>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Main Panel -->
+      <main class="main-content">
+        <!-- Tab Diff Semántico -->
+        <section id="view-diff" class="tab-view active">
+          <header class="view-header">
+            <div class="header-title">
+              <h1>Diferencias de Diseño Semánticas</h1>
+              <p>Compara el diseño actual de tu hardware con el último respaldo guardado en la caché local.</p>
+            </div>
+            <button id="btn-run-diff" class="btn btn-secondary" disabled>
+              ⚡ Calcular Cambios
+            </button>
+          </header>
+
+          <div class="diff-container">
+            <div id="diff-results" class="diff-results-panel">
+              <div class="empty-state">
+                <span class="empty-icon">🔍</span>
+                <h3>Sin diferencias calculadas</h3>
+                <p>Selecciona un proyecto de hardware y haz click en "Calcular Cambios" para ver el análisis semántico de PCB y BOM.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Formulario de Commit/Push -->
+          <footer class="push-footer">
+            <div class="push-form">
+              <input id="push-message" type="text" placeholder="Escribe un mensaje de respaldo (ej: Añadido capacitor de desacople C1)..." disabled />
+              <button id="btn-push" class="btn btn-accent" disabled>
+                🚀 Respaldar y Subir (Push)
+              </button>
+            </div>
+            <div id="push-log" class="push-log-output"></div>
+          </footer>
+        </section>
+
+        <!-- Tab Historial Local -->
+        <section id="view-history" class="tab-view">
+          <header class="view-header">
+            <div class="header-title">
+              <h1>Historial de Resguardos Locales</h1>
+              <p>Historial local offline de tus versiones (.ito/history.toml) con resguardos comprimidos.</p>
+            </div>
+          </header>
+
+          <div class="history-container">
+            <div id="history-list" class="history-list-panel">
+              <div class="empty-state">
+                <span class="empty-icon">📜</span>
+                <h3>Historial vacío</h3>
+                <p>No se encontraron commits locales para este proyecto.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>
