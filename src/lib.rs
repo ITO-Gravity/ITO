@@ -38,25 +38,31 @@ pub async fn run_push(project_dir: std::path::PathBuf, message: Option<String>) 
     let config: Config = toml::from_str(&config_str)
         .map_err(|e| format!("Error al parsear configuración: {}", e))?;
 
-    // 2. Comprobar archivos locales
-    let new_cad = project_dir.join("design.json");
-    let new_bom = project_dir.join("bom.csv");
+    // 2. Parsear el proyecto de hardware (detecta y unifica cualquier formato nativo)
+    let design = parsers::parse_project_directory(&project_dir)
+        .map_err(|e| format!("Error al analizar el directorio de hardware: {}", e))?;
 
-    if !new_cad.exists() {
-        return Err("Se requiere el archivo 'design.json' en el directorio seleccionado.".to_string());
+    // 3. Serializar diseño a bytes normalizados para hashing y empaquetado
+    let design_bytes = serde_json::to_vec_pretty(&design)
+        .map_err(|e| format!("Error al serializar diseño normalizado: {}", e))?;
+
+    let mut wtr = csv::Writer::from_writer(Vec::new());
+    wtr.write_record(&["Designator", "MPN", "Manufacturer", "Value", "Footprint"]).ok();
+    for (des, comp) in &design.components {
+        wtr.write_record(&[
+            des.as_str(),
+            comp.mpn.as_deref().unwrap_or(""),
+            comp.manufacturer.as_deref().unwrap_or(""),
+            comp.value.as_deref().unwrap_or(""),
+            comp.footprint.as_deref().unwrap_or(""),
+        ]).ok();
     }
+    let bom_bytes = wtr.into_inner().unwrap_or_default();
 
-    // 3. Calcular hash SHA-256 de los archivos
-    let design_bytes = std::fs::read(&new_cad)
-        .map_err(|e| format!("Error al leer design.json: {}", e))?;
     let mut hasher = Sha256::new();
     hasher.update(&design_bytes);
+    hasher.update(&bom_bytes);
     
-    if new_bom.exists() {
-        let bom_bytes = std::fs::read(&new_bom)
-            .map_err(|e| format!("Error al leer bom.csv: {}", e))?;
-        hasher.update(&bom_bytes);
-    }
     let hash_result = hasher.finalize();
     let hash_str = format!("{:x}", hash_result);
 
@@ -99,10 +105,8 @@ pub async fn run_push(project_dir: std::path::PathBuf, message: Option<String>) 
     zip.write_all(&design_bytes)
         .map_err(|e| format!("Error al escribir design.json al zip: {}", e))?;
 
-    // Adjuntar bom.csv al ZIP (si existe)
-    if new_bom.exists() {
-        let bom_bytes = std::fs::read(&new_bom)
-            .map_err(|e| format!("Error al leer bom.csv: {}", e))?;
+    // Adjuntar bom.csv al ZIP (si contiene componentes)
+    if !design.components.is_empty() {
         zip.start_file("bom.csv", options)
             .map_err(|e| format!("Error al añadir bom.csv al zip: {}", e))?;
         zip.write_all(&bom_bytes)
@@ -139,10 +143,8 @@ pub async fn run_push(project_dir: std::path::PathBuf, message: Option<String>) 
         .map_err(|e| format!("Error al crear parte design_json: {}", e))?;
     form = form.part("design_json", design_part);
 
-    if new_bom.exists() {
-        let bom_bytes = std::fs::read(&new_bom)
-            .map_err(|e| format!("Error al leer bom.csv: {}", e))?;
-        let bom_part = reqwest::multipart::Part::bytes(bom_bytes)
+    if !design.components.is_empty() {
+        let bom_part = reqwest::multipart::Part::bytes(bom_bytes.clone())
             .file_name("bom.csv")
             .mime_str("text/csv")
             .map_err(|e| format!("Error al crear parte bom_csv: {}", e))?;
@@ -183,11 +185,11 @@ pub async fn run_push(project_dir: std::path::PathBuf, message: Option<String>) 
     // 8. Actualizar la caché local para 'ito diff'
     let cache_dir = project_dir.join(".ito").join("cache");
     std::fs::create_dir_all(&cache_dir).ok();
-    std::fs::copy(&new_cad, cache_dir.join("design.old.json")).ok();
-    if new_bom.exists() {
-        std::fs::copy(&new_bom, cache_dir.join("bom.old.csv")).ok();
+    std::fs::write(cache_dir.join("design.json"), &design_bytes).ok();
+    if !design.components.is_empty() {
+        std::fs::write(cache_dir.join("bom.csv"), &bom_bytes).ok();
     } else {
-        let cached_old_bom = cache_dir.join("bom.old.csv");
+        let cached_old_bom = cache_dir.join("bom.csv");
         if cached_old_bom.exists() {
             std::fs::remove_file(cached_old_bom).ok();
         }

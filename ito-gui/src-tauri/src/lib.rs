@@ -44,8 +44,21 @@ fn load_project_status(dir: String) -> Result<ProjectStatus, String> {
         ("No inicializado".to_string(), "".to_string())
     };
 
-    let design_exists = path.join("design.json").exists();
-    let bom_exists = path.join("bom.csv").exists();
+    let mut design_exists = false;
+    let mut bom_exists = false;
+    if let Ok(entries) = std::fs::read_dir(&path) {
+        for entry in entries.flatten() {
+            if let Some(ext) = entry.path().extension().and_then(|s| s.to_str()) {
+                let ext_lower = ext.to_lowercase();
+                if ext_lower == "kicad_pcb" || ext_lower == "kicad_sch" || ext_lower == "brd" || ext_lower == "sch" || ext_lower == "json" {
+                    design_exists = true;
+                }
+                if ext_lower == "xlsx" || ext_lower == "xls" || ext_lower == "csv" {
+                    bom_exists = true;
+                }
+            }
+        }
+    }
 
     // Cargar historial
     let history_path = path.join(".ito").join("history.toml");
@@ -76,39 +89,23 @@ pub struct DesignsPayload {
 #[tauri::command]
 fn calculate_diff(dir: String) -> Result<DesignsPayload, String> {
     let path = PathBuf::from(&dir);
-    let new_cad = path.join("design.json");
-    let new_bom = path.join("bom.csv");
-
-    if !new_cad.exists() {
-        return Err("No se encontró design.json en la carpeta seleccionada.".to_string());
-    }
+    
+    let new_design = ito::parsers::parse_project_directory(&path)
+        .map_err(|e| format!("Error al analizar el diseño local: {}", e))?;
 
     let cache_dir = path.join(".ito").join("cache");
-    let old_cad = cache_dir.join("design.old.json");
-    let old_bom = cache_dir.join("bom.old.csv");
-
     let mut old_design_opt = None;
-    let old_design = if old_cad.exists() {
-        let mut design = ito::parsers::parse_cad_json(&old_cad)
-            .map_err(|e| format!("Error al parsear design.old.json: {}", e))?;
-        if old_bom.exists() {
-            let bom = ito::parsers::parse_bom_csv(&old_bom)
-                .map_err(|e| format!("Error al parsear bom.old.csv: {}", e))?;
-            design.merge_bom(bom);
+    
+    let old_design = if cache_dir.exists() {
+        if let Ok(design) = ito::parsers::parse_project_directory(&cache_dir) {
+            old_design_opt = Some(design.clone());
+            design
+        } else {
+            ito::models::HardwareDesign::new()
         }
-        old_design_opt = Some(design.clone());
-        design
     } else {
         ito::models::HardwareDesign::new()
     };
-
-    let mut new_design = ito::parsers::parse_cad_json(&new_cad)
-        .map_err(|e| format!("Error al parsear design.json: {}", e))?;
-    if new_bom.exists() {
-        let bom = ito::parsers::parse_bom_csv(&new_bom)
-            .map_err(|e| format!("Error al parsear bom.csv: {}", e))?;
-        new_design.merge_bom(bom);
-    }
 
     let diff_result = ito::diff::diff_designs(&old_design, &new_design);
     Ok(DesignsPayload {

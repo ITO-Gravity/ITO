@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 
 use crate::models::{Component, Pin, ElectricalType, HardwareDesign};
 
@@ -91,6 +91,106 @@ pub fn parse_bom_csv_reader<R: std::io::Read>(reader: R) -> Result<HashMap<Strin
     }
     
     Ok(components)
+}
+
+pub mod kicad;
+pub mod eagle;
+pub mod excel_bom;
+
+/// Parsea una lista de materiales (BOM) en formato CSV o Excel.
+pub fn parse_bom<P: AsRef<Path>>(path: P) -> Result<HashMap<String, Component>> {
+    let ext = path.as_ref().extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    
+    match ext.as_str() {
+        "xlsx" | "xls" | "ods" => excel_bom::parse_excel_bom(path),
+        _ => parse_bom_csv(path),
+    }
+}
+
+/// Parsea un archivo de diseño CAD (JSON, KiCad, Eagle).
+pub fn parse_cad<P: AsRef<Path>>(path: P) -> Result<HardwareDesign> {
+    let ext = path.as_ref().extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    
+    match ext.as_str() {
+        "kicad_pcb" | "kicad_sch" => kicad::parse_kicad(path),
+        "sch" | "brd" => {
+            if is_xml_file(&path) {
+                eagle::parse_eagle(path)
+            } else {
+                Err(anyhow!("Formato de esquema/PCB no soportado"))
+            }
+        }
+        _ => parse_cad_json(path),
+    }
+}
+
+fn is_xml_file<P: AsRef<Path>>(path: P) -> bool {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        let trimmed = content.trim_start();
+        trimmed.starts_with("<?xml") || trimmed.starts_with("<eagle")
+    } else {
+        false
+    }
+}
+
+/// Escanea un directorio de proyecto, localiza y parsea automáticamente
+/// cualquier archivo nativo de diseño de hardware y su BOM correspondiente,
+/// unificándolos en un HardwareDesign.
+pub fn parse_project_directory<P: AsRef<Path>>(dir: P) -> Result<HardwareDesign> {
+    let dir = dir.as_ref();
+    
+    let mut cad_file = None;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                    let ext_lower = ext.to_lowercase();
+                    if ext_lower == "kicad_pcb" || ext_lower == "kicad_sch" || ext_lower == "brd" || (ext_lower == "sch" && !path.to_string_lossy().contains("bom")) {
+                        cad_file = Some(path);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    let cad_path = cad_file.unwrap_or_else(|| dir.join("design.json"));
+    if !cad_path.exists() {
+        return Err(anyhow!("No se encontró ningún archivo de diseño de hardware (design.json, .kicad_pcb, .sch, .brd)"));
+    }
+    
+    let mut design = parse_cad(&cad_path)?;
+    
+    let mut bom_file = None;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                    let ext_lower = ext.to_lowercase();
+                    if ext_lower == "xlsx" || ext_lower == "xls" || (ext_lower == "csv" && path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase().contains("bom")) {
+                        bom_file = Some(path);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    let bom_path = bom_file.unwrap_or_else(|| dir.join("bom.csv"));
+    if bom_path.exists() {
+        let bom = parse_bom(&bom_path)?;
+        design.merge_bom(bom);
+    }
+    
+    Ok(design)
 }
 
 /// Parsea un archivo de BOM en formato CSV desde una ruta del sistema.
