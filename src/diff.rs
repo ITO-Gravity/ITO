@@ -1,13 +1,15 @@
 use std::collections::{HashMap, HashSet};
-use crate::models::{Component, Pin, ElectricalType, Net, PinReference, HardwareDesign};
+use crate::models::{Component, ElectricalType, Net, PinReference, HardwareDesign};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PinChange {
     Name { old: String, new: String },
     ElectricalType { old: ElectricalType, new: ElectricalType },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ComponentChange {
     Mpn { old: Option<String>, new: Option<String> },
     Manufacturer { old: Option<String>, new: Option<String> },

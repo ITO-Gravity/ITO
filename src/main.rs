@@ -5,6 +5,12 @@ mod diff;
 use clap::{Parser, Subcommand};
 use anyhow::Result;
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct Config {
+    project_id: String,
+    remote_url: String,
+}
+
 #[derive(Parser)]
 #[command(name = "ito")]
 #[command(about = "Ito: Motor de versionado semántico para ingeniería de hardware", long_about = None)]
@@ -30,15 +36,42 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Sincroniza el reporte semántico con la nube de Alexandria-HQ
+    Push,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
         Commands::Init => {
-            println!("Inicializando repositorio Ito en el directorio actual...");
-            // TODO: Crear directorio .ito, estructuras de control, etc.
+            let current_dir = std::env::current_dir()?;
+            let ito_dir = current_dir.join(".ito");
+            
+            if !ito_dir.exists() {
+                std::fs::create_dir_all(&ito_dir)?;
+            }
+
+            let config_path = ito_dir.join("config.toml");
+            if !config_path.exists() {
+                let project_name = current_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("ito-project")
+                    .to_string();
+
+                let default_config = Config {
+                    project_id: project_name,
+                    remote_url: "https://api.alexandria-hq.com/v1/reports".to_string(),
+                };
+
+                let toml_str = toml::to_string_pretty(&default_config)?;
+                std::fs::write(&config_path, toml_str)?;
+                println!("Repositorio Ito inicializado con éxito. Configuración creada en '.ito/config.toml'.");
+            } else {
+                println!("El repositorio Ito ya estaba inicializado en este directorio.");
+            }
         }
         Commands::Status => {
             let current_dir = std::env::current_dir()?;
@@ -323,6 +356,81 @@ fn main() -> Result<()> {
             }
 
             println!("");
+        }
+        Commands::Push => {
+            let current_dir = std::env::current_dir()?;
+            let config_path = current_dir.join(".ito").join("config.toml");
+
+            if !config_path.exists() {
+                anyhow::bail!(
+                    "Error: No se encontró la configuración de Ito. ¿Corriste 'ito init' primero?"
+                );
+            }
+
+            // 1. Leer configuración TOML
+            let config_str = std::fs::read_to_string(&config_path)?;
+            let config: Config = toml::from_str(&config_str)?;
+
+            // 2. Comprobar archivos locales
+            let old_cad = current_dir.join("design.old.json");
+            let old_bom = current_dir.join("bom.old.csv");
+            let new_cad = current_dir.join("design.json");
+            let new_bom = current_dir.join("bom.csv");
+
+            if !old_cad.exists() || !new_cad.exists() {
+                anyhow::bail!(
+                    "Error: Se requieren los archivos 'design.old.json' y 'design.json' en el directorio actual para comparar y enviar."
+                );
+            }
+
+            println!("Construyendo reporte semántico de hardware...");
+
+            // 3. Cargar y fusionar OLD
+            let mut old_design = parsers::parse_cad_json(&old_cad)?;
+            if old_bom.exists() {
+                let bom = parsers::parse_bom_csv(&old_bom)?;
+                old_design.merge_bom(bom);
+            }
+
+            // 4. Cargar y fusionar NEW
+            let mut new_design = parsers::parse_cad_json(&new_cad)?;
+            if new_bom.exists() {
+                let bom = parsers::parse_bom_csv(&new_bom)?;
+                new_design.merge_bom(bom);
+            }
+
+            // 5. Comparar y armar reporte
+            let diff_result = diff::diff_designs(&old_design, &new_design);
+            let report = diff::ItoReport::new(config.project_id.clone(), diff_result);
+
+            println!("Enviando reporte semántico a Alexandria-HQ ({})...", config.remote_url);
+
+            // 6. Enviar POST
+            let client = reqwest::Client::new();
+            let response = client
+                .post(&config.remote_url)
+                .json(&report)
+                .send()
+                .await?;
+
+            use colored::Colorize;
+            if response.status().is_success() {
+                println!(
+                    "{}",
+                    format!(
+                        "¡Reporte sincronizado con éxito en Alexandria-HQ! [Proyecto: {}]",
+                        config.project_id
+                    )
+                    .green()
+                    .bold()
+                );
+            } else {
+                anyhow::bail!(
+                    "Error del servidor Alexandria-HQ (HTTP {}): {}",
+                    response.status(),
+                    response.text().await.unwrap_or_default()
+                );
+            }
         }
     }
 

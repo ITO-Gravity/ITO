@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ElectricalType {
     Input,
     Output,
@@ -73,6 +74,7 @@ impl Component {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_details(
         mut self,
         mpn: &str,
