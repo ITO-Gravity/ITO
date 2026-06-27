@@ -11,6 +11,21 @@ struct Config {
     remote_url: String,
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+struct CommitEntry {
+    hash: String,
+    parent_hash: String,
+    message: String,
+    timestamp: String,
+    zip_path: String,
+    synced: bool,
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize, Clone)]
+struct History {
+    commits: Vec<CommitEntry>,
+}
+
 #[derive(Parser)]
 #[command(name = "ito")]
 #[command(about = "Ito: Motor de versionado semántico para ingeniería de hardware", long_about = None)]
@@ -36,8 +51,12 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Sincroniza el reporte semántico con la nube de Alexandria-HQ
-    Push,
+    /// Sincroniza y respalda los archivos locales con la nube de Alexandria-HQ
+    Push {
+        /// Mensaje descriptivo para el commit/respaldo
+        #[arg(short, long)]
+        message: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -376,7 +395,7 @@ async fn main() -> Result<()> {
 
             println!("");
         }
-        Commands::Push => {
+        Commands::Push { message } => {
             let current_dir = std::env::current_dir()?;
             let config_path = current_dir.join(".ito").join("config.toml");
 
@@ -400,21 +419,95 @@ async fn main() -> Result<()> {
                 );
             }
 
-            println!("Sincronizando y subiendo archivos del proyecto a Alexandria-HQ ({})...", config.remote_url);
+            // 3. Calcular hash SHA-256 de los archivos
+            use sha2::{Sha256, Digest};
+            let design_bytes = std::fs::read(&new_cad)?;
+            let mut hasher = Sha256::new();
+            hasher.update(&design_bytes);
+            
+            if new_bom.exists() {
+                let bom_bytes = std::fs::read(&new_bom)?;
+                hasher.update(&bom_bytes);
+            }
+            let hash_result = hasher.finalize();
+            let hash_str = format!("{:x}", hash_result);
 
-            // 3. Preparar formulario Multipart
+            // 4. Cargar historial local
+            let history_path = current_dir.join(".ito").join("history.toml");
+            let mut history = if history_path.exists() {
+                let content = std::fs::read_to_string(&history_path)?;
+                toml::from_str(&content).unwrap_or_default()
+            } else {
+                History::default()
+            };
+
+            let parent_hash = history
+                .commits
+                .last()
+                .map(|c| c.hash.clone())
+                .unwrap_or_else(|| "0000000000000000000000000000000000000000000000000000000000000000".to_string());
+
+            // Si el hash coincide con el último commit, no hay cambios
+            if hash_str == parent_hash {
+                use colored::Colorize;
+                println!("{}", "No hay cambios pendientes de hardware para respaldar ni sincronizar.".green().bold());
+                return Ok(());
+            }
+
+            println!("Generando respaldo local comprimido...");
+
+            // 5. Crear la carpeta de respaldos y el ZIP
+            let backups_dir = current_dir.join(".ito").join("backups");
+            std::fs::create_dir_all(&backups_dir)?;
+            let zip_path = backups_dir.join(format!("{}.zip", hash_str));
+            let zip_file = std::fs::File::create(&zip_path)?;
+            let mut zip = zip::ZipWriter::new(zip_file);
+
+            let options = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+
+            // Adjuntar design.json al ZIP
+            zip.start_file("design.json", options)?;
+            use std::io::Write;
+            zip.write_all(&design_bytes)?;
+
+            // Adjuntar bom.csv al ZIP (si existe)
+            if new_bom.exists() {
+                let bom_bytes = std::fs::read(&new_bom)?;
+                zip.start_file("bom.csv", options)?;
+                zip.write_all(&bom_bytes)?;
+            }
+            zip.finish()?;
+
+            // 6. Registrar en el historial local
+            let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let commit_msg = message.clone().unwrap_or_else(|| "Sincronización de hardware".to_string());
+            let relative_zip_path = format!(".ito/backups/{}.zip", hash_str);
+
+            let mut commit_entry = CommitEntry {
+                hash: hash_str.clone(),
+                parent_hash: parent_hash.clone(),
+                message: commit_msg.clone(),
+                timestamp,
+                zip_path: relative_zip_path,
+                synced: false,
+            };
+
+            // 7. Intentar la sincronización con Alexandria-HQ
+            println!("Sincronizando archivos del proyecto con Alexandria-HQ ({})...", config.remote_url);
+
             let mut form = reqwest::multipart::Form::new()
                 .text("project_id", config.project_id.clone())
-                .text("domain", "hardware");
+                .text("domain", "hardware")
+                .text("version_hash", hash_str.clone())
+                .text("parent_hash", parent_hash.clone())
+                .text("message", commit_msg.clone());
 
-            // Leer y adjuntar design.json
-            let design_bytes = std::fs::read(&new_cad)?;
-            let design_part = reqwest::multipart::Part::bytes(design_bytes)
+            let design_part = reqwest::multipart::Part::bytes(design_bytes.clone())
                 .file_name("design.json")
                 .mime_str("application/json")?;
             form = form.part("design_json", design_part);
 
-            // Leer y adjuntar bom.csv (si existe)
             if new_bom.exists() {
                 let bom_bytes = std::fs::read(&new_bom)?;
                 let bom_part = reqwest::multipart::Part::bytes(bom_bytes)
@@ -423,44 +516,68 @@ async fn main() -> Result<()> {
                 form = form.part("bom_csv", bom_part);
             }
 
-            // 4. Enviar Petición POST Multipart
-            let client = reqwest::Client::new();
-            let response = client
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()?;
+            let send_res = client
                 .post(&config.remote_url)
                 .multipart(form)
                 .send()
-                .await?;
+                .await;
 
             use colored::Colorize;
-            if response.status().is_success() {
-                // 5. Actualizar la caché local para 'ito diff' en caso de éxito
-                let cache_dir = current_dir.join(".ito").join("cache");
-                std::fs::create_dir_all(&cache_dir)?;
-                std::fs::copy(&new_cad, cache_dir.join("design.old.json"))?;
-                if new_bom.exists() {
-                    std::fs::copy(&new_bom, cache_dir.join("bom.old.csv"))?;
-                } else {
-                    let cached_old_bom = cache_dir.join("bom.old.csv");
-                    if cached_old_bom.exists() {
-                        std::fs::remove_file(cached_old_bom)?;
+            let mut sync_success = false;
+
+            match send_res {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        sync_success = true;
+                        println!(
+                            "{}",
+                            format!(
+                                "¡Archivos del proyecto sincronizados con éxito en Alexandria-HQ! [Proyecto: {}]",
+                                config.project_id
+                            )
+                            .green()
+                            .bold()
+                        );
+                    } else {
+                        println!(
+                            "{}",
+                            format!(
+                                "Backup local generado con éxito en .ito/backups/. Sincronización fallida (HTTP {}). Sincronización pendiente.",
+                                response.status()
+                            )
+                            .yellow()
+                        );
                     }
                 }
+                Err(_) => {
+                    println!(
+                        "{}",
+                        "Backup local generado con éxito en .ito/backups/. Sincronización con Alexandria-HQ pendiente (Servidor no disponible)"
+                            .yellow()
+                            .bold()
+                    );
+                }
+            }
 
-                println!(
-                    "{}",
-                    format!(
-                        "¡Archivos del proyecto sincronizados con éxito en Alexandria-HQ! [Proyecto: {}]",
-                        config.project_id
-                    )
-                    .green()
-                    .bold()
-                );
+            commit_entry.synced = sync_success;
+            history.commits.push(commit_entry);
+            let history_str = toml::to_string_pretty(&history)?;
+            std::fs::write(&history_path, history_str)?;
+
+            // 8. Actualizar la caché local para 'ito diff'
+            let cache_dir = current_dir.join(".ito").join("cache");
+            std::fs::create_dir_all(&cache_dir)?;
+            std::fs::copy(&new_cad, cache_dir.join("design.old.json"))?;
+            if new_bom.exists() {
+                std::fs::copy(&new_bom, cache_dir.join("bom.old.csv"))?;
             } else {
-                anyhow::bail!(
-                    "Error del servidor Alexandria-HQ (HTTP {}): {}",
-                    response.status(),
-                    response.text().await.unwrap_or_default()
-                );
+                let cached_old_bom = cache_dir.join("bom.old.csv");
+                if cached_old_bom.exists() {
+                    std::fs::remove_file(cached_old_bom)?;
+                }
             }
         }
     }
