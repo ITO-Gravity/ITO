@@ -113,25 +113,30 @@ async fn main() -> Result<()> {
         }
         Commands::Diff { path, json } => {
             let current_dir = std::env::current_dir()?;
-            
-            let old_cad = current_dir.join("design.old.json");
-            let old_bom = current_dir.join("bom.old.csv");
             let new_cad = current_dir.join("design.json");
             let new_bom = current_dir.join("bom.csv");
 
-            if !old_cad.exists() || !new_cad.exists() {
+            if !new_cad.exists() {
                 anyhow::bail!(
-                    "Error: Se requieren los archivos 'design.old.json' y 'design.json' en el directorio actual para comparar.\n\
-                     Si deseas comparar también la BOM, agrega 'bom.old.csv' y 'bom.csv'."
+                    "Error: Se requiere el archivo 'design.json' en el directorio actual para calcular las diferencias."
                 );
             }
 
-            // 1. Cargar diseño viejo (OLD)
-            let mut old_design = parsers::parse_cad_json(&old_cad)?;
-            if old_bom.exists() {
-                let bom = parsers::parse_bom_csv(&old_bom)?;
-                old_design.merge_bom(bom);
-            }
+            // 1. Cargar diseño viejo (OLD) desde la caché oculta
+            let cache_dir = current_dir.join(".ito").join("cache");
+            let old_cad = cache_dir.join("design.old.json");
+            let old_bom = cache_dir.join("bom.old.csv");
+
+            let old_design = if old_cad.exists() {
+                let mut design = parsers::parse_cad_json(&old_cad)?;
+                if old_bom.exists() {
+                    let bom = parsers::parse_bom_csv(&old_bom)?;
+                    design.merge_bom(bom);
+                }
+                design
+            } else {
+                models::HardwareDesign::new()
+            };
 
             // 2. Cargar diseño nuevo (NEW)
             let mut new_design = parsers::parse_cad_json(&new_cad)?;
@@ -372,27 +377,34 @@ async fn main() -> Result<()> {
             let config: Config = toml::from_str(&config_str)?;
 
             // 2. Comprobar archivos locales
-            let old_cad = current_dir.join("design.old.json");
-            let old_bom = current_dir.join("bom.old.csv");
             let new_cad = current_dir.join("design.json");
             let new_bom = current_dir.join("bom.csv");
 
-            if !old_cad.exists() || !new_cad.exists() {
+            if !new_cad.exists() {
                 anyhow::bail!(
-                    "Error: Se requieren los archivos 'design.old.json' y 'design.json' en el directorio actual para comparar y enviar."
+                    "Error: Se requiere el archivo 'design.json' en el directorio actual para enviar."
                 );
             }
 
             println!("Construyendo reporte semántico de hardware...");
 
-            // 3. Cargar y fusionar OLD
-            let mut old_design = parsers::parse_cad_json(&old_cad)?;
-            if old_bom.exists() {
-                let bom = parsers::parse_bom_csv(&old_bom)?;
-                old_design.merge_bom(bom);
-            }
+            // 3. Cargar diseño viejo (OLD) desde la caché oculta
+            let cache_dir = current_dir.join(".ito").join("cache");
+            let old_cad = cache_dir.join("design.old.json");
+            let old_bom = cache_dir.join("bom.old.csv");
 
-            // 4. Cargar y fusionar NEW
+            let old_design = if old_cad.exists() {
+                let mut design = parsers::parse_cad_json(&old_cad)?;
+                if old_bom.exists() {
+                    let bom = parsers::parse_bom_csv(&old_bom)?;
+                    design.merge_bom(bom);
+                }
+                design
+            } else {
+                models::HardwareDesign::new()
+            };
+
+            // 4. Cargar diseño nuevo (NEW)
             let mut new_design = parsers::parse_cad_json(&new_cad)?;
             if new_bom.exists() {
                 let bom = parsers::parse_bom_csv(&new_bom)?;
@@ -415,6 +427,18 @@ async fn main() -> Result<()> {
 
             use colored::Colorize;
             if response.status().is_success() {
+                // 7. Actualizar la caché local en caso de éxito
+                std::fs::create_dir_all(&cache_dir)?;
+                std::fs::copy(&new_cad, cache_dir.join("design.old.json"))?;
+                if new_bom.exists() {
+                    std::fs::copy(&new_bom, cache_dir.join("bom.old.csv"))?;
+                } else {
+                    let cached_old_bom = cache_dir.join("bom.old.csv");
+                    if cached_old_bom.exists() {
+                        std::fs::remove_file(cached_old_bom)?;
+                    }
+                }
+
                 println!(
                     "{}",
                     format!(

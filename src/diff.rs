@@ -284,7 +284,7 @@ fn diff_component(old: &Component, new: &Component) -> Vec<ComponentChange> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::PinReference;
+    use crate::models::{Pin, PinReference};
 
     #[test]
     fn test_diff_designs_component_footprint_change_and_net_expansion() {
