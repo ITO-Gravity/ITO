@@ -400,62 +400,41 @@ async fn main() -> Result<()> {
                 );
             }
 
-            println!("Construyendo reporte semántico de hardware...");
+            println!("Sincronizando y subiendo archivos del proyecto a Alexandria-HQ ({})...", config.remote_url);
 
-            // 3. Cargar diseño viejo (OLD) desde la caché oculta
-            let cache_dir = current_dir.join(".ito").join("cache");
-            let old_cad = cache_dir.join("design.old.json");
-            let old_bom = cache_dir.join("bom.old.csv");
+            // 3. Preparar formulario Multipart
+            let mut form = reqwest::multipart::Form::new()
+                .text("project_id", config.project_id.clone())
+                .text("domain", "hardware");
 
-            let old_design = if old_cad.exists() {
-                let mut design = parsers::parse_cad_json(&old_cad)?;
-                if old_bom.exists() {
-                    let bom = parsers::parse_bom_csv(&old_bom)?;
-                    design.merge_bom(bom);
-                }
-                design
-            } else {
-                models::HardwareDesign::new()
-            };
+            // Leer y adjuntar design.json
+            let design_bytes = std::fs::read(&new_cad)?;
+            let design_part = reqwest::multipart::Part::bytes(design_bytes)
+                .file_name("design.json")
+                .mime_str("application/json")?;
+            form = form.part("design_json", design_part);
 
-            // 4. Cargar diseño nuevo (NEW)
-            let mut new_design = parsers::parse_cad_json(&new_cad)?;
+            // Leer y adjuntar bom.csv (si existe)
             if new_bom.exists() {
-                let bom = parsers::parse_bom_csv(&new_bom)?;
-                new_design.merge_bom(bom);
+                let bom_bytes = std::fs::read(&new_bom)?;
+                let bom_part = reqwest::multipart::Part::bytes(bom_bytes)
+                    .file_name("bom.csv")
+                    .mime_str("text/csv")?;
+                form = form.part("bom_csv", bom_part);
             }
 
-            // 5. Comparar y armar reporte
-            let diff_result = diff::diff_designs(&old_design, &new_design);
-
-            let design_json_content = std::fs::read_to_string(&new_cad)?;
-            let bom_csv_content = if new_bom.exists() {
-                Some(std::fs::read_to_string(&new_bom)?)
-            } else {
-                None
-            };
-
-            let report = diff::ItoReport::new(
-                config.project_id.clone(),
-                diff_result,
-                new_design,
-                design_json_content,
-                bom_csv_content,
-            );
-
-            println!("Enviando reporte semántico a Alexandria-HQ ({})...", config.remote_url);
-
-            // 6. Enviar POST
+            // 4. Enviar Petición POST Multipart
             let client = reqwest::Client::new();
             let response = client
                 .post(&config.remote_url)
-                .json(&report)
+                .multipart(form)
                 .send()
                 .await?;
 
             use colored::Colorize;
             if response.status().is_success() {
-                // 7. Actualizar la caché local en caso de éxito
+                // 5. Actualizar la caché local para 'ito diff' en caso de éxito
+                let cache_dir = current_dir.join(".ito").join("cache");
                 std::fs::create_dir_all(&cache_dir)?;
                 std::fs::copy(&new_cad, cache_dir.join("design.old.json"))?;
                 if new_bom.exists() {
@@ -470,7 +449,7 @@ async fn main() -> Result<()> {
                 println!(
                     "{}",
                     format!(
-                        "¡Reporte sincronizado con éxito en Alexandria-HQ! [Proyecto: {}]",
+                        "¡Archivos del proyecto sincronizados con éxito en Alexandria-HQ! [Proyecto: {}]",
                         config.project_id
                     )
                     .green()
