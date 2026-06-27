@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ElectricalType {
     Input,
     Output,
@@ -32,7 +32,7 @@ impl std::str::FromStr for ElectricalType {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Pin {
     pub id: String, // ej. "1", "A2"
     pub name: String, // ej. "MISO", "VCC"
@@ -49,7 +49,7 @@ impl Pin {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Component {
     pub designator: String, // ej. "U1", "R5"
     pub mpn: Option<String>, // Manufacturer Part Number
@@ -95,19 +95,19 @@ impl Component {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct PinReference {
     pub component_designator: String, // ej. "U1"
     pub pin_id: String, // ej. "4"
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Net {
     pub name: String, // ej. "SPI_CLK", "Net-(R1-Pad2)"
     pub endpoints: HashSet<PinReference>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HardwareDesign {
     pub components: HashMap<String, Component>, // designator -> Component
     pub nets: HashMap<String, Net>, // net_name -> Net

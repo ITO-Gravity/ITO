@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use crate::models::{Component, Pin, ElectricalType, Net, PinReference, HardwareDesign};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PinChange {
     Name { old: String, new: String },
     ElectricalType { old: ElectricalType, new: ElectricalType },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ComponentChange {
     Mpn { old: Option<String>, new: Option<String> },
     Manufacturer { old: Option<String>, new: Option<String> },
@@ -21,21 +21,21 @@ pub enum ComponentChange {
     AttributeModified { key: String, old: String, new: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ComponentDiff {
     pub old: Component,
     pub new: Component,
     pub changes: Vec<ComponentChange>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ComponentDiffs {
     pub added: HashMap<String, Component>,
     pub deleted: HashMap<String, Component>,
     pub modified: HashMap<String, ComponentDiff>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NetDiff {
     pub old: Net,
     pub new: Net,
@@ -43,14 +43,14 @@ pub struct NetDiff {
     pub deleted_endpoints: HashSet<PinReference>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NetDiffs {
     pub added: HashMap<String, Net>,
     pub deleted: HashMap<String, Net>,
     pub modified: HashMap<String, NetDiff>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DesignDiff {
     pub components: ComponentDiffs,
     pub nets: NetDiffs,
@@ -66,6 +66,29 @@ impl DesignDiff {
             && self.nets.modified.is_empty()
     }
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ItoReport {
+    pub project_id: String,
+    pub domain: String,
+    pub timestamp: String,
+    pub ito_version: String,
+    pub diff: DesignDiff,
+}
+
+impl ItoReport {
+    pub fn new(project_id: String, diff: DesignDiff) -> Self {
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        Self {
+            project_id,
+            domain: "hardware".to_string(),
+            timestamp,
+            ito_version: env!("CARGO_PKG_VERSION").to_string(),
+            diff,
+        }
+    }
+}
+
 
 /// Realiza una comparación semántica entre un diseño antiguo (`old`) y uno nuevo (`new`).
 /// Detecta componentes agregados, eliminados o modificados, y redes eléctricas con sus conexiones alteradas.
@@ -351,5 +374,23 @@ mod tests {
             component_designator: "C1".to_string(),
             pin_id: "1".to_string(),
         }));
+    }
+
+    #[test]
+    fn test_ito_report_serialization() {
+        let old_design = HardwareDesign::new();
+        let new_design = HardwareDesign::new();
+        let diff = diff_designs(&old_design, &new_design);
+        
+        let report = ItoReport::new("test-project-123".to_string(), diff);
+        let json_str = serde_json::to_string(&report).unwrap();
+        
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        
+        assert_eq!(parsed["project_id"], "test-project-123");
+        assert_eq!(parsed["domain"], "hardware");
+        assert!(parsed["timestamp"].is_string());
+        assert!(parsed["ito_version"].is_string());
+        assert!(parsed["diff"].is_object());
     }
 }

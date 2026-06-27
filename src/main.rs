@@ -25,6 +25,10 @@ enum Commands {
         /// Opcional: Especificar archivo o componente para comparar
         #[arg(short, long)]
         path: Option<String>,
+
+        /// Generar reporte en formato JSON catalogado
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -74,7 +78,7 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Diff { path } => {
+        Commands::Diff { path, json } => {
             let current_dir = std::env::current_dir()?;
             
             let old_cad = current_dir.join("design.old.json");
@@ -105,6 +109,18 @@ fn main() -> Result<()> {
 
             // 3. Ejecutar comparación
             let diff_result = diff::diff_designs(&old_design, &new_design);
+
+            if *json {
+                let project_id = current_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("ito-project")
+                    .to_string();
+                let report = diff::ItoReport::new(project_id, diff_result);
+                let json_output = serde_json::to_string_pretty(&report)?;
+                println!("{}", json_output);
+                return Ok(());
+            }
 
             use colored::Colorize;
 
