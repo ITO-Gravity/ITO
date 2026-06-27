@@ -13,6 +13,25 @@ pub enum ElectricalType {
     Unspecified,
 }
 
+impl std::str::FromStr for ElectricalType {
+    type Err = ();
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().replace('_', "").as_str() {
+            "input" => Ok(ElectricalType::Input),
+            "output" => Ok(ElectricalType::Output),
+            "bidirectional" => Ok(ElectricalType::Bidirectional),
+            "powerinput" | "power" => Ok(ElectricalType::PowerInput),
+            "poweroutput" => Ok(ElectricalType::PowerOutput),
+            "passive" => Ok(ElectricalType::Passive),
+            "opencollector" => Ok(ElectricalType::OpenCollector),
+            "tristate" => Ok(ElectricalType::TriState),
+            _ => Ok(ElectricalType::Unspecified),
+        }
+    }
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pin {
     pub id: String, // ej. "1", "A2"
@@ -112,6 +131,40 @@ impl HardwareDesign {
             component_designator: component_designator.to_string(),
             pin_id: pin_id.to_string(),
         });
+    }
+
+    /// Fusiona la información de una BOM (HashMap de componentes) en el diseño actual.
+    /// Si un componente de la BOM coincide por designator, actualiza sus campos de fabricación.
+    /// Retorna una tupla con (cantidad_fusionados, designators_no_encontrados_en_cad).
+    pub fn merge_bom(&mut self, bom: HashMap<String, Component>) -> (usize, Vec<String>) {
+        let mut merged_count = 0;
+        let mut missing_in_cad = Vec::new();
+
+        for (des, bom_comp) in bom {
+            if let Some(cad_comp) = self.components.get_mut(&des) {
+                if bom_comp.mpn.is_some() {
+                    cad_comp.mpn = bom_comp.mpn;
+                }
+                if bom_comp.manufacturer.is_some() {
+                    cad_comp.manufacturer = bom_comp.manufacturer;
+                }
+                if bom_comp.value.is_some() {
+                    cad_comp.value = bom_comp.value;
+                }
+                if bom_comp.footprint.is_some() && (cad_comp.footprint.is_none() || cad_comp.footprint.as_deref() == Some("")) {
+                    cad_comp.footprint = bom_comp.footprint;
+                }
+                // Fusionar atributos extra
+                for (k, v) in bom_comp.attributes {
+                    cad_comp.add_attribute(&k, &v);
+                }
+                merged_count += 1;
+            } else {
+                missing_in_cad.push(des);
+            }
+        }
+
+        (merged_count, missing_in_cad)
     }
 }
 

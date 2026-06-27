@@ -1,4 +1,5 @@
 mod models;
+mod parsers;
 
 use clap::{Parser, Subcommand};
 use anyhow::Result;
@@ -35,15 +36,42 @@ fn main() -> Result<()> {
             // TODO: Crear directorio .ito, estructuras de control, etc.
         }
         Commands::Status => {
+            let current_dir = std::env::current_dir()?;
+            let cad_path = current_dir.join("design.json");
+            let bom_path = current_dir.join("bom.csv");
+
+            if !cad_path.exists() || !bom_path.exists() {
+                anyhow::bail!(
+                    "Error: Se requieren los archivos 'design.json' (CAD) y 'bom.csv' (BOM) en el directorio actual para analizar el hardware.\n\
+                     Directorio de ejecución actual: {}\n\
+                     Asegúrate de que ambos archivos existan en la carpeta de ejecución de Ito.",
+                     current_dir.display()
+                );
+            }
+
             println!("Analizando estado semántico del hardware...");
             
-            // Ejemplo de uso del modelo semántico
-            let mut _design = models::HardwareDesign::new();
+            // 1. Cargar diseño CAD (estructura física/eléctrica)
+            let mut design = parsers::parse_cad_json(cad_path)?;
+            let cad_comp_count = design.components.len();
+            let net_count = design.nets.len();
+
+            // 2. Cargar Lista de Materiales (BOM)
+            let bom = parsers::parse_bom_csv(bom_path)?;
+
+            // 3. Fusión semántica
+            let (merged_count, missing_in_cad) = design.merge_bom(bom);
+
+            println!("  BOM: {} componentes enriquecidos.", merged_count);
+            println!("  CAD: {} componentes cargados.", cad_comp_count);
+            println!("  Nets: {} conexiones eléctricas encontradas.", net_count);
             
-            // TODO: Escanear BOM, CAD/esquemas, y Firmware para buscar mutaciones.
-            println!("  BOM: Sin cambios detectados.");
-            println!("  CAD: Sin cambios detectados.");
-            println!("  Firmware: Sin cambios detectados.");
+            if !missing_in_cad.is_empty() {
+                println!("  ⚠️  Advertencia: Se encontraron {} componentes en la BOM que no existen en el archivo CAD:", missing_in_cad.len());
+                for des in missing_in_cad {
+                    println!("    - {}", des);
+                }
+            }
         }
         Commands::Diff { path } => {
             if let Some(p) = path {

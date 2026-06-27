@@ -1,0 +1,259 @@
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::BufReader;
+use std::path::Path;
+use anyhow::Result;
+
+use crate::models::{Component, Pin, ElectricalType, HardwareDesign};
+
+#[derive(Debug, serde::Deserialize)]
+struct BomRow {
+    #[serde(alias = "Designator", alias = "designator", alias = "RefDes")]
+    designator: String,
+    
+    #[serde(alias = "MPN", alias = "mpn", alias = "PartNumber")]
+    mpn: Option<String>,
+    
+    #[serde(alias = "Manufacturer", alias = "manufacturer", alias = "Brand")]
+    manufacturer: Option<String>,
+    
+    #[serde(alias = "Value", alias = "value")]
+    value: Option<String>,
+    
+    #[serde(alias = "Footprint", alias = "footprint", alias = "Package")]
+    footprint: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CadJson {
+    components: Vec<CadComponent>,
+    nets: Vec<CadNet>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CadComponent {
+    designator: String,
+    footprint: Option<String>,
+    pins: Vec<CadPin>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CadPin {
+    id: String,
+    name: String,
+    #[serde(alias = "electricalType", alias = "type")]
+    electrical_type: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CadNet {
+    name: String,
+    connections: Vec<CadConnection>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CadConnection {
+    component: String,
+    pin: String,
+}
+
+/// Parsea un archivo de BOM en formato CSV desde un Reader.
+pub fn parse_bom_csv_reader<R: std::io::Read>(reader: R) -> Result<HashMap<String, Component>> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .from_reader(reader);
+    
+    let mut components = HashMap::new();
+    
+    for result in rdr.deserialize::<BomRow>() {
+        let row = result?;
+        
+        // Soporte para designadores agrupados (ej. "R1, R2, R3" o "R1 R2 R3")
+        let designators = row.designator
+            .split(|c| c == ',' || c == ';'|| c == ' ')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+            
+        for des in designators {
+            let mut component = Component::new(des, row.footprint.as_deref().unwrap_or(""));
+            if let Some(ref mpn) = row.mpn {
+                component.mpn = Some(mpn.clone());
+            }
+            if let Some(ref mfr) = row.manufacturer {
+                component.manufacturer = Some(mfr.clone());
+            }
+            if let Some(ref val) = row.value {
+                component.value = Some(val.clone());
+            }
+            components.insert(des.to_string(), component);
+        }
+    }
+    
+    Ok(components)
+}
+
+/// Parsea un archivo de BOM en formato CSV desde una ruta del sistema.
+pub fn parse_bom_csv<P: AsRef<Path>>(path: P) -> Result<HashMap<String, Component>> {
+    let file = File::open(path)?;
+    parse_bom_csv_reader(BufReader::new(file))
+}
+
+/// Parsea un archivo de CAD en formato JSON (como Flux) desde un Reader.
+pub fn parse_cad_json_reader<R: std::io::Read>(reader: R) -> Result<HardwareDesign> {
+    let cad: CadJson = serde_json::from_reader(reader)?;
+    let mut design = HardwareDesign::new();
+    
+    for c in cad.components {
+        let mut comp = Component::new(&c.designator, c.footprint.as_deref().unwrap_or(""));
+        for p in c.pins {
+            let elec_type = if let Some(ref et_str) = p.electrical_type {
+                et_str.parse().unwrap_or(ElectricalType::Unspecified)
+            } else {
+                ElectricalType::Unspecified
+            };
+            let pin = Pin::new(&p.id, &p.name, elec_type);
+            comp = comp.with_pin(pin);
+        }
+        design.add_component(comp);
+    }
+    
+    for n in cad.nets {
+        for conn in n.connections {
+            design.add_net_endpoint(&n.name, &conn.component, &conn.pin);
+        }
+    }
+    
+    Ok(design)
+}
+
+/// Parsea un archivo de CAD en formato JSON desde una ruta del sistema.
+pub fn parse_cad_json<P: AsRef<Path>>(path: P) -> Result<HardwareDesign> {
+    let file = File::open(path)?;
+    parse_cad_json_reader(BufReader::new(file))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::PinReference;
+
+    #[test]
+    fn test_parse_bom_csv() {
+        let csv_data = r#"Designator,MPN,Manufacturer,Value,Footprint
+"R1, R2",MC0805F103,Multicomp,10k,0805
+U1,NE555P,TI,555 Timer,SOIC-8
+"#;
+
+        let result = parse_bom_csv_reader(csv_data.as_bytes()).unwrap();
+
+        assert_eq!(result.len(), 3);
+        assert!(result.contains_key("R1"));
+        assert!(result.contains_key("R2"));
+        assert!(result.contains_key("U1"));
+
+        let r1 = result.get("R1").unwrap();
+        assert_eq!(r1.value.as_deref(), Some("10k"));
+        assert_eq!(r1.manufacturer.as_deref(), Some("Multicomp"));
+        assert_eq!(r1.footprint.as_deref(), Some("0805"));
+
+        let u1 = result.get("U1").unwrap();
+        assert_eq!(u1.mpn.as_deref(), Some("NE555P"));
+        assert_eq!(u1.footprint.as_deref(), Some("SOIC-8"));
+    }
+
+    #[test]
+    fn test_parse_cad_json() {
+        let json_data = r#"{
+          "components": [
+            {
+              "designator": "U1",
+              "footprint": "SOIC-8",
+              "pins": [
+                {"id": "1", "name": "GND", "electricalType": "PowerInput"},
+                {"id": "8", "name": "VCC", "electricalType": "PowerInput"}
+              ]
+            },
+            {
+              "designator": "R1",
+              "footprint": "0805",
+              "pins": [
+                {"id": "1", "name": "P1", "type": "Passive"},
+                {"id": "2", "name": "P2", "type": "Passive"}
+              ]
+            }
+          ],
+          "nets": [
+            {
+              "name": "SPI_MISO",
+              "connections": [
+                {"component": "U1", "pin": "1"},
+                {"component": "R1", "pin": "2"}
+              ]
+            }
+          ]
+        }"#;
+
+        let design = parse_cad_json_reader(json_data.as_bytes()).unwrap();
+
+        assert_eq!(design.components.len(), 2);
+        assert!(design.components.contains_key("U1"));
+        assert!(design.components.contains_key("R1"));
+
+        let u1 = design.components.get("U1").unwrap();
+        assert_eq!(u1.pins.len(), 2);
+        assert_eq!(u1.pins.get("1").unwrap().electrical_type, ElectricalType::PowerInput);
+
+        assert!(design.nets.contains_key("SPI_MISO"));
+        let net = design.nets.get("SPI_MISO").unwrap();
+        assert_eq!(net.endpoints.len(), 2);
+        assert!(net.endpoints.contains(&PinReference {
+            component_designator: "U1".to_string(),
+            pin_id: "1".to_string(),
+        }));
+    }
+
+    #[test]
+    fn test_merge_bom_and_cad() {
+        // 1. JSON del CAD (Estructura física y conexiones)
+        let json_data = r#"{
+          "components": [
+            {
+              "designator": "R1",
+              "footprint": "0805",
+              "pins": [
+                {"id": "1", "name": "P1"},
+                {"id": "2", "name": "P2"}
+              ]
+            }
+          ],
+          "nets": []
+        }"#;
+
+        let mut design = parse_cad_json_reader(json_data.as_bytes()).unwrap();
+        
+        // Antes del merge, no tenemos datos comerciales/de fabricación
+        let r1_cad = design.components.get("R1").unwrap();
+        assert_eq!(r1_cad.mpn, None);
+        assert_eq!(r1_cad.manufacturer, None);
+
+        // 2. CSV de la BOM (Datos comerciales)
+        let csv_data = r#"Designator,MPN,Manufacturer,Value,Footprint
+R1,MC0805F103,Multicomp,10k,0805
+"#;
+        let bom = parse_bom_csv_reader(csv_data.as_bytes()).unwrap();
+
+        // 3. Fusionar datos de la BOM en el diseño CAD
+        let (merged, missing) = design.merge_bom(bom);
+
+        assert_eq!(merged, 1);
+        assert_eq!(missing.len(), 0);
+
+        // Después del merge, U1 en CAD tiene la información de la BOM
+        let r1_merged = design.components.get("R1").unwrap();
+        assert_eq!(r1_merged.mpn.as_deref(), Some("MC0805F103"));
+        assert_eq!(r1_merged.manufacturer.as_deref(), Some("Multicomp"));
+        assert_eq!(r1_merged.value.as_deref(), Some("10k"));
+        assert_eq!(r1_merged.footprint.as_deref(), Some("0805"));
+    }
+}
