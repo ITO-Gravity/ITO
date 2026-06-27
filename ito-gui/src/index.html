@@ -6,139 +6,200 @@
     <title>Ito Desktop Client</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css" />
     <script type="module" src="/main.js" defer></script>
   </head>
 
   <body>
     <div class="app-layout">
-      <!-- Sidebar / Configuración -->
+      <!-- Sidebar Estilo Alexandria-HQ -->
       <aside class="sidebar">
-        <div class="brand">
-          <div class="brand-logo">🧵</div>
-          <div class="brand-text">
-            <h2>ITO</h2>
-            <span>Alexandria-HQ™</span>
-          </div>
+        <!-- Selector de Cuenta / Organización -->
+        <div class="org-selector">
+          <div class="org-avatar">V</div>
+          <span class="org-name">Vasloth</span>
+          <span class="chevron">▾</span>
         </div>
 
-        <div class="project-selector-panel">
-          <button id="btn-select-folder" class="btn btn-primary btn-block">
-            📂 Seleccionar Proyecto
-          </button>
-          <div id="selected-path" class="path-display" title="No hay carpeta seleccionada">
-            No hay carpeta seleccionada
+        <!-- Sección de Proyectos -->
+        <div class="sidebar-section">
+          <div class="section-header">
+            <span class="section-title">MIS PROYECTOS</span>
+            <button id="btn-select-folder" class="btn-action">+ Proyecto</button>
           </div>
-        </div>
 
-        <nav class="sidebar-nav">
-          <button class="nav-item active" id="tab-diff">
-            <span class="nav-icon">🔍</span> Diff Semántico
-          </button>
-          <button class="nav-item" id="tab-history">
-            <span class="nav-icon">📜</span> Historial Local
-          </button>
-        </nav>
+          <!-- Selector de Ruta del Proyecto Actual -->
+          <div class="project-selector-wrapper">
+            <div id="selected-path" class="path-display" title="No hay carpeta seleccionada">
+              No hay carpeta seleccionada
+            </div>
+          </div>
 
-        <div class="project-info-card">
-          <h4>INFORMACIÓN</h4>
-          <div class="info-row">
-            <span class="info-label">Proyecto:</span>
-            <span class="info-value" id="info-project-id">-</span>
-          </div>
-          <div class="info-row">
-            <span class="info-label">Servidor:</span>
-            <span class="info-value" id="info-remote-url" title="-">-</span>
-          </div>
-          <div class="info-row">
-            <span class="info-label">design.json:</span>
-            <span class="info-value status-dot" id="status-design">🔴 Ausente</span>
-          </div>
-          <div class="info-row">
-            <span class="info-label">bom.csv:</span>
-            <span class="info-value status-dot" id="status-bom">🔴 Ausente</span>
-          </div>
+          <!-- Lista de Proyectos Ficticios para Completar UI -->
+          <ul class="projects-list">
+            <li class="project-item active">
+              <span class="project-dot"></span>
+              <span class="project-name-text" id="sidebar-active-project">Vasloth / PRUEBA-ITO</span>
+              <span class="project-badge">PRIV</span>
+            </li>
+            <li class="project-item">
+              <span class="project-dot"></span>
+              <span class="project-name-text">Vasloth / Sensor de Flujo</span>
+              <span class="project-badge">PRIV</span>
+            </li>
+            <li class="project-item">
+              <span class="project-dot"></span>
+              <span class="project-name-text">Vasloth / Sensor De Impacto</span>
+              <span class="project-badge">PUB</span>
+            </li>
+            <li class="project-item">
+              <span class="project-dot"></span>
+              <span class="project-name-text">Vasloth / Sensor de Luz</span>
+              <span class="project-badge">PUB</span>
+            </li>
+            <li class="project-item">
+              <span class="project-dot"></span>
+              <span class="project-name-text">Vasloth / Sensor de Temp.</span>
+              <span class="project-badge">PUB</span>
+            </li>
+          </ul>
         </div>
       </aside>
 
-      <!-- Main Panel -->
+      <!-- Main Content Area -->
       <main class="main-content">
-        <!-- Tab Diff Semántico -->
-        <section id="view-diff" class="tab-view active">
-          <header class="view-header">
-            <div class="header-title">
-              <h1>Diferencias de Diseño Semánticas</h1>
-              <p>Compara el diseño actual de tu hardware con el último respaldo guardado en la caché local.</p>
-            </div>
-            <button id="btn-run-diff" class="btn btn-secondary" disabled>
-              ⚡ Calcular Cambios
-            </button>
-          </header>
-
-          <div class="diff-split-layout">
-            <!-- Columna Izquierda: Resultados de Texto y Cambios -->
-            <div class="diff-container">
-              <div id="diff-results" class="diff-results-panel">
-                <div class="empty-state">
-                  <span class="empty-icon">🔍</span>
-                  <h3>Sin diferencias calculadas</h3>
-                  <p>Selecciona un proyecto de hardware y haz click en "Calcular Cambios" para ver el análisis semántico de PCB y BOM.</p>
-                </div>
-              </div>
-            </div>
-
-            <!-- Columna Derecha: Visualizador Gráfico de la PCB -->
-            <div class="pcb-viewer-container">
-              <div class="pcb-viewer-header">
-                <h3>🖥️ Visualizador Semántico de PCB</h3>
-                <div class="pcb-viewer-legend">
-                  <span class="legend-item"><span class="legend-dot added"></span>Añadido</span>
-                  <span class="legend-item"><span class="legend-dot deleted"></span>Eliminado</span>
-                  <span class="legend-item"><span class="legend-dot modified"></span>Modificado</span>
-                </div>
-              </div>
-              <div id="pcb-canvas-container" class="pcb-canvas-wrapper">
-                <div class="empty-state">
-                  <span class="empty-icon">🖥️</span>
-                  <h3>PCB sin renderizar</h3>
-                  <p>Calcula los cambios para ver el renderizado interactivo antes/después del hardware.</p>
-                </div>
-              </div>
-            </div>
+        <!-- Cabecera del Proyecto Activo -->
+        <header class="project-header">
+          <div class="breadcrumbs">
+            <span class="breadcrumb-root">Vasloth</span>
+            <span class="divider">/</span>
+            <span class="breadcrumb-current" id="header-project-id">PRUEBA-ITO</span>
+            <span class="project-badge-large">PRIVATE</span>
           </div>
+          <div class="user-profile">
+            <span class="user-avatar">TR</span>
+            <span class="user-name">Tobias Ryske</span>
+            <span class="chevron">▾</span>
+          </div>
+        </header>
 
-          <!-- Formulario de Commit/Push -->
-          <footer class="push-footer">
-            <div class="push-form">
-              <input id="push-message" type="text" placeholder="Escribe un mensaje de respaldo (ej: Añadido capacitor de desacople C1)..." disabled />
-              <button id="btn-push" class="btn btn-accent" disabled>
-                🚀 Respaldar y Subir (Push)
+        <!-- Navegación por Pestañas Planas (Alexandria-HQ) -->
+        <nav class="project-tabs">
+          <button class="tab-item active" id="tab-diff">
+            Brainstorm
+          </button>
+          <button class="tab-item" id="tab-history">
+            Versiones
+          </button>
+          <button class="tab-item" disabled>
+            Colaboradores
+          </button>
+          <button class="tab-item" disabled>
+            Manufactura
+          </button>
+        </nav>
+
+        <!-- Contenedor de Vistas -->
+        <div class="views-container">
+          <!-- Vista de Brainstorm (Diff y Visualizador PCB) -->
+          <section id="view-diff" class="tab-view active">
+            <!-- Barra de Acciones de Diff -->
+            <div class="action-bar">
+              <div class="action-title">
+                <h3>Borrador en vivo</h3>
+                <span class="status-indicator-dot"></span>
+                <span class="status-text">Archivos en vivo</span>
+              </div>
+              <button id="btn-run-diff" class="btn btn-primary" disabled>
+                ⚡ Calcular Cambios
               </button>
             </div>
-            <div id="push-log" class="push-log-output"></div>
-          </footer>
-        </section>
 
-        <!-- Tab Historial Local -->
-        <section id="view-history" class="tab-view">
-          <header class="view-header">
-            <div class="header-title">
-              <h1>Historial de Resguardos Locales</h1>
-              <p>Historial local offline de tus versiones (.ito/history.toml) con resguardos comprimidos.</p>
-            </div>
-          </header>
+            <!-- Layout Dividido (Diff Texto + Render de la PCB) -->
+            <div class="diff-split-layout">
+              <!-- Columna Izquierda: Listado de Cambios -->
+              <div class="diff-container">
+                <div id="diff-results" class="diff-results-panel">
+                  <div class="empty-state">
+                    <span class="empty-icon">🔍</span>
+                    <h3>Sin diferencias calculadas</h3>
+                    <p>Selecciona la carpeta de tu proyecto de hardware para contrastar los archivos locales contra el último push.</p>
+                  </div>
+                </div>
+              </div>
 
-          <div class="history-container">
-            <div id="history-list" class="history-list-panel">
-              <div class="empty-state">
-                <span class="empty-icon">📜</span>
-                <h3>Historial vacío</h3>
-                <p>No se encontraron commits locales para este proyecto.</p>
+              <!-- Columna Derecha: Renderizador de la PCB -->
+              <div class="pcb-viewer-container">
+                <div class="pcb-viewer-header">
+                  <h3>🖥️ Visualizador Semántico de PCB</h3>
+                  <div class="pcb-viewer-legend">
+                    <span class="legend-item"><span class="legend-dot added"></span>Añadido</span>
+                    <span class="legend-item"><span class="legend-dot deleted"></span>Eliminado</span>
+                    <span class="legend-item"><span class="legend-dot modified"></span>Modificado</span>
+                  </div>
+                </div>
+                <div id="pcb-canvas-container" class="pcb-canvas-wrapper">
+                  <div class="empty-state">
+                    <span class="empty-icon">🖥️</span>
+                    <h3>PCB sin renderizar</h3>
+                    <p>Calcula los cambios para visualizar el circuito impreso.</p>
+                  </div>
+                </div>
               </div>
             </div>
+
+            <!-- Formulario de Push / Commit -->
+            <footer class="push-footer">
+              <div class="push-form">
+                <input id="push-message" type="text" placeholder="Escribe el mensaje de esta versión (ej: Corregida línea de VCC)..." disabled />
+                <button id="btn-push" class="btn btn-dark" disabled>
+                  🚀 Guardar Versión (Push)
+                </button>
+              </div>
+              <div id="push-log" class="push-log-output"></div>
+            </footer>
+          </section>
+
+          <!-- Vista de Versiones (Historial de Commits Local) -->
+          <section id="view-history" class="tab-view">
+            <div class="action-bar">
+              <div class="action-title">
+                <h3>Historial de Versiones (Local)</h3>
+              </div>
+            </div>
+
+            <div class="history-container">
+              <div id="history-list" class="history-list-panel">
+                <div class="empty-state">
+                  <span class="empty-icon">📜</span>
+                  <h3>Historial vacío</h3>
+                  <p>No se encontraron versiones guardadas localmente en este proyecto.</p>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <!-- Información de Configuración Invisible en Sidebar pero útil en el footer -->
+        <footer class="project-info-footer">
+          <div class="info-item">
+            <span class="info-label">Identificador:</span>
+            <span class="info-value" id="info-project-id">-</span>
           </div>
-        </section>
+          <div class="info-item">
+            <span class="info-label">URL Remota:</span>
+            <span class="info-value" id="info-remote-url">-</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">design.json:</span>
+            <span class="info-value" id="status-design">🔴 Ausente</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">bom.csv:</span>
+            <span class="info-value" id="status-bom">🔴 Ausente</span>
+          </div>
+        </footer>
       </main>
     </div>
   </body>

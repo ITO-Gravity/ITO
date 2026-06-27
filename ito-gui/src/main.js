@@ -48,10 +48,12 @@ async function refreshProjectStatus() {
   try {
     const status = await invoke("load_project_status", { dir: currentDir });
     
-    // Actualizar datos de info en el sidebar
+    // Actualizar datos de info en el sidebar y cabecera
     infoProjectIdEl.textContent = status.project_id;
     infoRemoteUrlEl.textContent = status.remote_url || "-";
     infoRemoteUrlEl.title = status.remote_url || "-";
+    document.getElementById("sidebar-active-project").textContent = "Vasloth / " + status.project_id;
+    document.getElementById("header-project-id").textContent = status.project_id;
 
     // Actualizar estados visuales de archivos
     statusDesignEl.innerHTML = status.design_exists 
