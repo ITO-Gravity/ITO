@@ -1,6 +1,7 @@
 pub mod models;
 pub mod parsers;
 pub mod diff;
+pub mod linter;
 
 use sha2::{Sha256, Digest};
 use std::io::Write;

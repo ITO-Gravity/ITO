@@ -1,11 +1,6 @@
-mod models;
-mod parsers;
-mod diff;
-
+use ito::{models, parsers, diff, linter, Config};
 use clap::{Parser, Subcommand};
 use anyhow::Result;
-
-use ito::Config;
 
 #[derive(Parser)]
 #[command(name = "ito")]
@@ -37,6 +32,16 @@ enum Commands {
         /// Mensaje descriptivo para el commit/respaldo
         #[arg(short, long)]
         message: Option<String>,
+
+        /// Forzar el push omitiendo errores críticos del linter
+        #[arg(long)]
+        force: bool,
+    },
+    /// Ejecuta reglas de diseño eléctrico semántico (ERC)
+    Lint {
+        /// Opcional: Impedir impresiones detalladas, retornando únicamente el estado del sistema
+        #[arg(short, long)]
+        quiet: bool,
     },
 }
 
@@ -337,8 +342,27 @@ async fn main() -> Result<()> {
 
             println!("");
         }
-        Commands::Push { message } => {
+        Commands::Push { message, force } => {
             let current_dir = std::env::current_dir()?;
+            
+            // Ejecutar linter antes de subir
+            if let Ok(design) = parsers::parse_project_directory(&current_dir) {
+                let issues = linter::run_lint(&design);
+                let critical_count = issues.iter().filter(|i| i.severity == linter::LintSeverity::Critical).count();
+                if critical_count > 0 && !*force {
+                    use colored::Colorize;
+                    println!("{}", "❌ Error: Se detectaron errores críticos en el diseño de hardware:".red().bold());
+                    for issue in &issues {
+                        if issue.severity == linter::LintSeverity::Critical {
+                            println!("  - [{}] {}", issue.rule_id.red().bold(), issue.message);
+                            println!("    {}", issue.details.dimmed());
+                        }
+                    }
+                    println!("\n{}", "Push cancelado. Corrige los errores o usa '--force' para ignorarlos y continuar.".yellow().bold());
+                    anyhow::bail!("Push abortado debido a errores ERC del linter.");
+                }
+            }
+
             match ito::run_push(current_dir, message.clone()).await {
                 Ok((_, info_msg)) => {
                     use colored::Colorize;
@@ -352,6 +376,46 @@ async fn main() -> Result<()> {
                         anyhow::bail!("{}", err_msg);
                     }
                 }
+            }
+        }
+        Commands::Lint { quiet } => {
+            let current_dir = std::env::current_dir()?;
+            let design = parsers::parse_project_directory(&current_dir)?;
+            let issues = linter::run_lint(&design);
+            
+            let critical_count = issues.iter().filter(|i| i.severity == linter::LintSeverity::Critical).count();
+            let warning_count = issues.iter().filter(|i| i.severity == linter::LintSeverity::Warning).count();
+
+            if !*quiet {
+                use colored::Colorize;
+                println!("{}", "=== REGLAS ELÉCTRICAS DE DISEÑO (ERC) ===".bold());
+                if issues.is_empty() {
+                    println!("{}", "✅ No se detectó ninguna anomalía en el diseño.".green().bold());
+                } else {
+                    for issue in &issues {
+                        match issue.severity {
+                            linter::LintSeverity::Critical => {
+                                println!("\n🔴 [CRITICAL] [{}] {}", issue.rule_id.red().bold(), issue.message.red());
+                                println!("   {}", issue.details.dimmed());
+                            }
+                            linter::LintSeverity::Warning => {
+                                println!("\n🟡 [WARNING] [{}] {}", issue.rule_id.yellow().bold(), issue.message.yellow());
+                                println!("   {}", issue.details.dimmed());
+                            }
+                            linter::LintSeverity::Info => {
+                                println!("\n🔵 [INFO] [{}] {}", issue.rule_id.blue().bold(), issue.message.blue());
+                                println!("   {}", issue.details.dimmed());
+                            }
+                        }
+                    }
+                    println!("\n🔍 Resumen: {} crítico(s), {} advertencia(s).", 
+                             critical_count.to_string().red().bold(), 
+                             warning_count.to_string().yellow().bold());
+                }
+            }
+
+            if critical_count > 0 {
+                std::process::exit(1);
             }
         }
     }
