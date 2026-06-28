@@ -39,30 +39,55 @@ pub async fn run_push(project_dir: std::path::PathBuf, message: Option<String>) 
     let config: Config = toml::from_str(&config_str)
         .map_err(|e| format!("Error al parsear configuración: {}", e))?;
 
-    // 2. Parsear el proyecto de hardware (detecta y unifica cualquier formato nativo)
-    let design = parsers::parse_project_directory(&project_dir)
-        .map_err(|e| format!("Error al analizar el directorio de hardware: {}", e))?;
-
-    // 3. Serializar diseño a bytes normalizados para hashing y empaquetado
-    let design_bytes = serde_json::to_vec_pretty(&design)
-        .map_err(|e| format!("Error al serializar diseño normalizado: {}", e))?;
-
-    let mut wtr = csv::Writer::from_writer(Vec::new());
-    wtr.write_record(&["Designator", "MPN", "Manufacturer", "Value", "Footprint"]).ok();
-    for (des, comp) in &design.components {
-        wtr.write_record(&[
-            des.as_str(),
-            comp.mpn.as_deref().unwrap_or(""),
-            comp.manufacturer.as_deref().unwrap_or(""),
-            comp.value.as_deref().unwrap_or(""),
-            comp.footprint.as_deref().unwrap_or(""),
-        ]).ok();
+    // 2. Localizar archivos originales de hardware en la carpeta del proyecto
+    let mut cad_file_path = None;
+    let mut bom_file_path = None;
+    
+    if let Ok(entries) = std::fs::read_dir(&project_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                    let ext_lower = ext.to_lowercase();
+                    if ext_lower == "kicad_pcb" || ext_lower == "kicad_sch" || ext_lower == "brd" || ext_lower == "edif" || ext_lower == "edf" || (ext_lower == "sch" && !path.to_string_lossy().contains("bom")) {
+                        cad_file_path = Some(path);
+                    } else if ext_lower == "xlsx" || ext_lower == "xls" || (ext_lower == "csv" && path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase().contains("bom")) {
+                        bom_file_path = Some(path);
+                    }
+                }
+            }
+        }
     }
-    let bom_bytes = wtr.into_inner().unwrap_or_default();
 
+    let cad_path = cad_file_path.unwrap_or_else(|| project_dir.join("design.json"));
+    if !cad_path.exists() {
+        return Err("No se encontró ningún archivo de diseño de hardware (design.json, .kicad_pcb, .sch, .brd, .edif)".to_string());
+    }
+
+    let bom_path = bom_file_path.unwrap_or_else(|| project_dir.join("bom.csv"));
+
+    let cad_bytes = std::fs::read(&cad_path)
+        .map_err(|e| format!("Error al leer el archivo de diseño {}: {}", cad_path.display(), e))?;
+        
+    let bom_bytes = if bom_path.exists() {
+        Some(std::fs::read(&bom_path).map_err(|e| format!("Error al leer el archivo BOM {}: {}", bom_path.display(), e))?)
+    } else {
+        None
+    };
+
+    let cad_filename = cad_path.file_name().and_then(|s| s.to_str()).unwrap_or("design.json").to_string();
+    let bom_filename = if bom_bytes.is_some() {
+        Some(bom_path.file_name().and_then(|s| s.to_str()).unwrap_or("bom.csv").to_string())
+    } else {
+        None
+    };
+
+    // 3. Calcular hash SHA-256 de los archivos originales
     let mut hasher = Sha256::new();
-    hasher.update(&design_bytes);
-    hasher.update(&bom_bytes);
+    hasher.update(&cad_bytes);
+    if let Some(ref b_bytes) = bom_bytes {
+        hasher.update(b_bytes);
+    }
     
     let hash_result = hasher.finalize();
     let hash_str = format!("{:x}", hash_result);
@@ -100,18 +125,18 @@ pub async fn run_push(project_dir: std::path::PathBuf, message: Option<String>) 
     let options = zip::write::FileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
-    // Adjuntar design.json al ZIP
-    zip.start_file("design.json", options)
-        .map_err(|e| format!("Error al añadir design.json al zip: {}", e))?;
-    zip.write_all(&design_bytes)
-        .map_err(|e| format!("Error al escribir design.json al zip: {}", e))?;
+    // Adjuntar archivo CAD original al ZIP
+    zip.start_file(&cad_filename, options)
+        .map_err(|e| format!("Error al añadir {} al zip: {}", cad_filename, e))?;
+    zip.write_all(&cad_bytes)
+        .map_err(|e| format!("Error al escribir {} al zip: {}", cad_filename, e))?;
 
-    // Adjuntar bom.csv al ZIP (si contiene componentes)
-    if !design.components.is_empty() {
-        zip.start_file("bom.csv", options)
-            .map_err(|e| format!("Error al añadir bom.csv al zip: {}", e))?;
-        zip.write_all(&bom_bytes)
-            .map_err(|e| format!("Error al escribir bom.csv al zip: {}", e))?;
+    // Adjuntar archivo BOM original al ZIP (si existe)
+    if let (Some(ref b_filename), Some(ref b_bytes)) = (&bom_filename, &bom_bytes) {
+        zip.start_file(b_filename, options)
+            .map_err(|e| format!("Error al añadir {} al zip: {}", b_filename, e))?;
+        zip.write_all(b_bytes)
+            .map_err(|e| format!("Error al escribir {} al zip: {}", b_filename, e))?;
     }
     zip.finish()
         .map_err(|e| format!("Error al finalizar zip: {}", e))?;
@@ -138,17 +163,17 @@ pub async fn run_push(project_dir: std::path::PathBuf, message: Option<String>) 
         .text("parent_hash", parent_hash.clone())
         .text("message", commit_msg.clone());
 
-    let design_part = reqwest::multipart::Part::bytes(design_bytes.clone())
-        .file_name("design.json")
-        .mime_str("application/json")
-        .map_err(|e| format!("Error al crear parte design_json: {}", e))?;
+    let design_part = reqwest::multipart::Part::bytes(cad_bytes.clone())
+        .file_name(cad_filename.clone())
+        .mime_str(get_mime_type_from_filename(&cad_filename))
+        .map_err(|e| format!("Error al crear parte design_file: {}", e))?;
     form = form.part("design_json", design_part);
 
-    if !design.components.is_empty() {
-        let bom_part = reqwest::multipart::Part::bytes(bom_bytes.clone())
-            .file_name("bom.csv")
-            .mime_str("text/csv")
-            .map_err(|e| format!("Error al crear parte bom_csv: {}", e))?;
+    if let (Some(ref b_filename), Some(ref b_bytes)) = (&bom_filename, &bom_bytes) {
+        let bom_part = reqwest::multipart::Part::bytes((*b_bytes).clone())
+            .file_name(b_filename.clone())
+            .mime_str(get_mime_type_from_filename(b_filename))
+            .map_err(|e| format!("Error al crear parte bom_file: {}", e))?;
         form = form.part("bom_csv", bom_part);
     }
 
@@ -185,16 +210,27 @@ pub async fn run_push(project_dir: std::path::PathBuf, message: Option<String>) 
 
     // 8. Actualizar la caché local para 'ito diff'
     let cache_dir = project_dir.join(".ito").join("cache");
+    if cache_dir.exists() {
+        std::fs::remove_dir_all(&cache_dir).ok();
+    }
     std::fs::create_dir_all(&cache_dir).ok();
-    std::fs::write(cache_dir.join("design.json"), &design_bytes).ok();
-    if !design.components.is_empty() {
-        std::fs::write(cache_dir.join("bom.csv"), &bom_bytes).ok();
-    } else {
-        let cached_old_bom = cache_dir.join("bom.csv");
-        if cached_old_bom.exists() {
-            std::fs::remove_file(cached_old_bom).ok();
-        }
+    
+    std::fs::write(cache_dir.join(&cad_filename), &cad_bytes).ok();
+    if let (Some(ref b_filename), Some(ref b_bytes)) = (&bom_filename, &bom_bytes) {
+        std::fs::write(cache_dir.join(b_filename), b_bytes).ok();
     }
 
     Ok((commit_entry, info_msg))
+}
+
+fn get_mime_type_from_filename(filename: &str) -> &'static str {
+    let ext = filename.split('.').last().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "edif" | "edf" => "text/plain",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "xls" => "application/vnd.ms-excel",
+        _ => "application/octet-stream",
+    }
 }
