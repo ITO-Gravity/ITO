@@ -38,8 +38,6 @@ enum Commands {
         #[arg(short, long)]
         message: Option<String>,
     },
-    /// Abre la interfaz gráfica de escritorio de Ito
-    Gui,
 }
 
 #[tokio::main]
@@ -77,75 +75,28 @@ async fn main() -> Result<()> {
         }
         Commands::Status => {
             let current_dir = std::env::current_dir()?;
-            let cad_path = current_dir.join("design.json");
-            let bom_path = current_dir.join("bom.csv");
-
-            if !cad_path.exists() || !bom_path.exists() {
-                anyhow::bail!(
-                    "Error: Se requieren los archivos 'design.json' (CAD) y 'bom.csv' (BOM) en el directorio actual para analizar el hardware.\n\
-                     Directorio de ejecución actual: {}\n\
-                     Asegúrate de que ambos archivos existan en la carpeta de ejecución de Ito.",
-                     current_dir.display()
-                );
-            }
-
             println!("Analizando estado semántico del hardware...");
             
-            // 1. Cargar diseño CAD (estructura física/eléctrica)
-            let mut design = parsers::parse_cad_json(cad_path)?;
+            let design = parsers::parse_project_directory(&current_dir)?;
             let cad_comp_count = design.components.len();
             let net_count = design.nets.len();
 
-            // 2. Cargar Lista de Materiales (BOM)
-            let bom = parsers::parse_bom_csv(bom_path)?;
-
-            // 3. Fusión semántica
-            let (merged_count, missing_in_cad) = design.merge_bom(bom);
-
-            println!("  BOM: {} componentes enriquecidos.", merged_count);
-            println!("  CAD: {} componentes cargados.", cad_comp_count);
+            println!("  CAD/Esquema: {} componentes cargados.", cad_comp_count);
             println!("  Nets: {} conexiones eléctricas encontradas.", net_count);
-            
-            if !missing_in_cad.is_empty() {
-                println!("  ⚠️  Advertencia: Se encontraron {} componentes en la BOM que no existen en el archivo CAD:", missing_in_cad.len());
-                for des in missing_in_cad {
-                    println!("    - {}", des);
-                }
-            }
         }
         Commands::Diff { path, json } => {
             let current_dir = std::env::current_dir()?;
-            let new_cad = current_dir.join("design.json");
-            let new_bom = current_dir.join("bom.csv");
-
-            if !new_cad.exists() {
-                anyhow::bail!(
-                    "Error: Se requiere el archivo 'design.json' en el directorio actual para calcular las diferencias."
-                );
-            }
 
             // 1. Cargar diseño viejo (OLD) desde la caché oculta
             let cache_dir = current_dir.join(".ito").join("cache");
-            let old_cad = cache_dir.join("design.old.json");
-            let old_bom = cache_dir.join("bom.old.csv");
-
-            let old_design = if old_cad.exists() {
-                let mut design = parsers::parse_cad_json(&old_cad)?;
-                if old_bom.exists() {
-                    let bom = parsers::parse_bom_csv(&old_bom)?;
-                    design.merge_bom(bom);
-                }
-                design
+            let old_design = if cache_dir.exists() {
+                parsers::parse_project_directory(&cache_dir).unwrap_or_else(|_| models::HardwareDesign::new())
             } else {
                 models::HardwareDesign::new()
             };
 
             // 2. Cargar diseño nuevo (NEW)
-            let mut new_design = parsers::parse_cad_json(&new_cad)?;
-            if new_bom.exists() {
-                let bom = parsers::parse_bom_csv(&new_bom)?;
-                new_design.merge_bom(bom);
-            }
+            let new_design = parsers::parse_project_directory(&current_dir)?;
 
             // 3. Ejecutar comparación
             let diff_result = diff::diff_designs(&old_design, &new_design);
@@ -157,12 +108,20 @@ async fn main() -> Result<()> {
                     .unwrap_or("ito-project")
                     .to_string();
 
-                let design_json_content = std::fs::read_to_string(&new_cad)?;
-                let bom_csv_content = if new_bom.exists() {
-                    Some(std::fs::read_to_string(&new_bom)?)
-                } else {
-                    None
-                };
+                let design_json_content = serde_json::to_string_pretty(&new_design)?;
+                
+                let mut wtr = csv::Writer::from_writer(Vec::new());
+                wtr.write_record(&["Designator", "MPN", "Manufacturer", "Value", "Footprint"]).ok();
+                for (des, comp) in &new_design.components {
+                    wtr.write_record(&[
+                        des.as_str(),
+                        comp.mpn.as_deref().unwrap_or(""),
+                        comp.manufacturer.as_deref().unwrap_or(""),
+                        comp.value.as_deref().unwrap_or(""),
+                        comp.footprint.as_deref().unwrap_or(""),
+                    ]).ok();
+                }
+                let bom_csv_content = Some(String::from_utf8(wtr.into_inner().unwrap_or_default())?);
 
                 let report = diff::ItoReport::new(
                     project_id,
@@ -392,29 +351,6 @@ async fn main() -> Result<()> {
                     } else {
                         anyhow::bail!("{}", err_msg);
                     }
-                }
-            }
-        }
-        Commands::Gui => {
-            let current_exe = std::env::current_exe()?;
-            let exe_dir = current_exe.parent().unwrap();
-            let gui_exe = exe_dir.join("ito-gui.exe");
-
-            if gui_exe.exists() {
-                println!("Iniciando la Interfaz Gráfica de Ito...");
-                std::process::Command::new(gui_exe).spawn()?;
-            } else {
-                println!("No se encontró el ejecutable de la GUI. Intentando iniciar en modo desarrollo...");
-                let current_dir = std::env::current_dir()?;
-                let gui_project_dir = current_dir.join("ito-gui");
-                if gui_project_dir.exists() {
-                    let mut cmd = std::process::Command::new("cmd.exe");
-                    cmd.arg("/c")
-                        .arg("npm run tauri dev")
-                        .current_dir(gui_project_dir);
-                    cmd.spawn()?;
-                } else {
-                    anyhow::bail!("Error: No se encontró el binario 'ito-gui.exe' ni la carpeta del proyecto GUI.");
                 }
             }
         }

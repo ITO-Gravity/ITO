@@ -96,6 +96,7 @@ pub fn parse_bom_csv_reader<R: std::io::Read>(reader: R) -> Result<HashMap<Strin
 pub mod kicad;
 pub mod eagle;
 pub mod excel_bom;
+pub mod edif;
 
 /// Parsea una lista de materiales (BOM) en formato CSV o Excel.
 pub fn parse_bom<P: AsRef<Path>>(path: P) -> Result<HashMap<String, Component>> {
@@ -119,6 +120,7 @@ pub fn parse_cad<P: AsRef<Path>>(path: P) -> Result<HardwareDesign> {
     
     match ext.as_str() {
         "kicad_pcb" | "kicad_sch" => kicad::parse_kicad(path),
+        "edif" | "edf" => edif::parse_edif(path),
         "sch" | "brd" => {
             if is_xml_file(&path) {
                 eagle::parse_eagle(path)
@@ -152,7 +154,7 @@ pub fn parse_project_directory<P: AsRef<Path>>(dir: P) -> Result<HardwareDesign>
             if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                     let ext_lower = ext.to_lowercase();
-                    if ext_lower == "kicad_pcb" || ext_lower == "kicad_sch" || ext_lower == "brd" || (ext_lower == "sch" && !path.to_string_lossy().contains("bom")) {
+                    if ext_lower == "kicad_pcb" || ext_lower == "kicad_sch" || ext_lower == "brd" || ext_lower == "edif" || ext_lower == "edf" || (ext_lower == "sch" && !path.to_string_lossy().contains("bom")) {
                         cad_file = Some(path);
                         break;
                     }
@@ -163,7 +165,7 @@ pub fn parse_project_directory<P: AsRef<Path>>(dir: P) -> Result<HardwareDesign>
     
     let cad_path = cad_file.unwrap_or_else(|| dir.join("design.json"));
     if !cad_path.exists() {
-        return Err(anyhow!("No se encontró ningún archivo de diseño de hardware (design.json, .kicad_pcb, .sch, .brd)"));
+        return Err(anyhow!("No se encontró ningún archivo de diseño de hardware (design.json, .kicad_pcb, .sch, .brd, .edif)"));
     }
     
     let mut design = parse_cad(&cad_path)?;
@@ -355,5 +357,47 @@ R1,MC0805F103,Multicomp,10k,0805
         assert_eq!(r1_merged.manufacturer.as_deref(), Some("Multicomp"));
         assert_eq!(r1_merged.value.as_deref(), Some("10k"));
         assert_eq!(r1_merged.footprint.as_deref(), Some("0805"));
+    }
+
+    #[test]
+    fn test_parse_edif() {
+        let edif_data = r#"(edif test_design
+          (edifVersion 2 0 0)
+          (edifLevel 0)
+          (keywordMap (keywordLevel 0))
+          (library lib
+            (cell U1
+              (view view_1
+                (interface
+                  (port p1)
+                )
+              )
+            )
+          )
+          (design root
+            (cellRef U1 (libraryRef lib))
+            (contents
+              (instance R1)
+              (net net_vcc
+                (joined
+                  (portRef p1 (instanceRef R1))
+                )
+              )
+            )
+          )
+        )"#;
+        
+        let mut design = crate::models::HardwareDesign::new();
+        if let Ok(value) = lexpr::from_str(edif_data) {
+            super::edif::traverse_edif_node(&value, &mut design);
+        }
+        
+        assert!(design.components.contains_key("R1"));
+        let net = design.nets.get("net_vcc").unwrap();
+        assert_eq!(net.endpoints.len(), 1);
+        assert!(net.endpoints.contains(&crate::models::PinReference {
+            component_designator: "R1".to_string(),
+            pin_id: "p1".to_string(),
+        }));
     }
 }
