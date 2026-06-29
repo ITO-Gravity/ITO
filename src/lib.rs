@@ -352,6 +352,101 @@ pub fn run_new(cwd: std::path::PathBuf, project_name: &str) -> Result<(std::path
     Ok((project_dir, project_uuid))
 }
 
+pub fn get_default_workspace_path() -> Result<std::path::PathBuf, String> {
+    let home = if cfg!(target_os = "windows") {
+        std::env::var("USERPROFILE").ok()
+    } else {
+        std::env::var("HOME").ok()
+    };
+    home.map(|h| std::path::PathBuf::from(h).join("Documents").join("ITO"))
+        .ok_or_else(|| "No se pudo determinar el directorio de inicio (Home) del usuario.".to_string())
+}
+
+pub fn get_global_config_pointer_path() -> Result<std::path::PathBuf, String> {
+    let home = if cfg!(target_os = "windows") {
+        std::env::var("USERPROFILE").ok()
+    } else {
+        std::env::var("HOME").ok()
+    };
+    home.map(|h| std::path::PathBuf::from(h).join(".ito").join("config.json"))
+        .ok_or_else(|| "No se pudo determinar el directorio de inicio (Home) del usuario.".to_string())
+}
+
+pub fn load_workspace_config() -> Result<Option<models::ItoWorkspaceConfig>, String> {
+    let pointer_path = get_global_config_pointer_path()?;
+    if pointer_path.exists() {
+        let content = std::fs::read_to_string(&pointer_path)
+            .map_err(|e| format!("Error al leer configuración global en {}: {}", pointer_path.display(), e))?;
+        let config: models::ItoWorkspaceConfig = serde_json::from_str(&content)
+            .map_err(|e| format!("Error al parsear configuración global: {}", e))?;
+        return Ok(Some(config));
+    }
+
+    // Si no hay pointer, probar en la ubicación por defecto
+    let default_ws = get_default_workspace_path()?;
+    let default_config_path = default_ws.join("Config").join("config.json");
+    if default_config_path.exists() {
+        let content = std::fs::read_to_string(&default_config_path)
+            .map_err(|e| format!("Error al leer configuración en {}: {}", default_config_path.display(), e))?;
+        let config: models::ItoWorkspaceConfig = serde_json::from_str(&content)
+            .map_err(|e| format!("Error al parsear configuración: {}", e))?;
+        return Ok(Some(config));
+    }
+
+    Ok(None)
+}
+
+pub fn save_workspace_config(workspace_path: &std::path::Path) -> Result<(), String> {
+    let config = models::ItoWorkspaceConfig {
+        workspace: workspace_path.to_string_lossy().to_string(),
+        version: "1.0".to_string(),
+    };
+    let config_str = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Error al serializar configuración de workspace: {}", e))?;
+
+    // Asegurar subdirectorios del workspace
+    initialize_workspace_structure(workspace_path)?;
+
+    // Guardar en Workspace/Config/config.json
+    let local_config_path = workspace_path.join("Config").join("config.json");
+    std::fs::write(&local_config_path, &config_str)
+        .map_err(|e| format!("Error al escribir configuración de workspace en {}: {}", local_config_path.display(), e))?;
+
+    // Guardar en ~/.ito/config.json
+    let pointer_path = get_global_config_pointer_path()?;
+    if let Some(parent) = pointer_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Error al crear directorio global de configuración {}: {}", parent.display(), e))?;
+    }
+    std::fs::write(&pointer_path, &config_str)
+        .map_err(|e| format!("Error al escribir puntero de configuración en {}: {}", pointer_path.display(), e))?;
+
+    Ok(())
+}
+
+pub fn initialize_workspace_structure(workspace_path: &std::path::Path) -> Result<(), String> {
+    let subdirs = ["Projects", "Templates", "Cache", "Logs", "Config"];
+    for subdir in &subdirs {
+        let path = workspace_path.join(subdir);
+        std::fs::create_dir_all(&path)
+            .map_err(|e| format!("Error al crear subdirectorio del workspace '{}': {}", path.display(), e))?;
+    }
+    Ok(())
+}
+
+pub fn run_workspace_get_count(workspace_path: &std::path::Path) -> usize {
+    let projects_dir = workspace_path.join("Projects");
+    let mut count = 0;
+    if let Ok(entries) = std::fs::read_dir(projects_dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,5 +479,61 @@ mod tests {
 
         // Limpiar
         std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_workspace_config_flow() {
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_home = std::env::temp_dir().join(format!("ito-home-{}", unique_id));
+        let temp_ws = temp_home.join("Documents").join("ITO");
+
+        // Configurar variables de entorno temporales para aislar la prueba
+        let original_userprofile = std::env::var("USERPROFILE").ok();
+        let original_home = std::env::var("HOME").ok();
+
+        std::env::set_var("USERPROFILE", &temp_home);
+        std::env::set_var("HOME", &temp_home);
+
+        // Validar rutas por defecto
+        let default_ws = get_default_workspace_path().unwrap();
+        assert_eq!(default_ws, temp_ws);
+
+        // Inicializar estructura del workspace
+        initialize_workspace_structure(&temp_ws).unwrap();
+        assert!(temp_ws.join("Projects").is_dir());
+        assert!(temp_ws.join("Config").is_dir());
+
+        // Guardar configuración
+        save_workspace_config(&temp_ws).unwrap();
+        
+        // Cargar configuración
+        let loaded = load_workspace_config().unwrap();
+        assert!(loaded.is_some());
+        let config = loaded.unwrap();
+        assert_eq!(config.workspace, temp_ws.to_string_lossy().to_string());
+
+        // Contar proyectos en workspace mock
+        assert_eq!(run_workspace_get_count(&temp_ws), 0);
+        
+        // Crear un proyecto de prueba
+        let projects_dir = temp_ws.join("Projects");
+        let (p_path, _) = run_new(projects_dir, "Proj1").unwrap();
+        assert!(p_path.is_dir());
+        assert_eq!(run_workspace_get_count(&temp_ws), 1);
+
+        // Limpiar
+        std::fs::remove_dir_all(&temp_home).ok();
+
+        // Restaurar variables de entorno
+        if let Some(val) = original_userprofile {
+            std::env::set_var("USERPROFILE", val);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
+        if let Some(val) = original_home {
+            std::env::set_var("HOME", val);
+        } else {
+            std::env::remove_var("HOME");
+        }
     }
 }

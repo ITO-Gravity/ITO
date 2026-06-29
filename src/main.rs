@@ -12,6 +12,15 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum WorkspaceSubcommand {
+    /// Cambia la ubicación del Workspace de ITO
+    Set {
+        /// Nueva ruta absoluta para el Workspace
+        path: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Inicializa un repositorio de Ito en el directorio actual
     Init,
@@ -47,6 +56,11 @@ enum Commands {
     New {
         /// Nombre del nuevo proyecto
         name: String,
+    },
+    /// Administra el Workspace global de ITO
+    Workspace {
+        #[command(subcommand)]
+        subcommand: Option<WorkspaceSubcommand>,
     },
 }
 
@@ -424,9 +438,72 @@ async fn main() -> Result<()> {
             }
         }
         Commands::New { name } => {
-            let current_dir = std::env::current_dir()?;
-            
-            match ito::run_new(current_dir, name) {
+            let ws_config = match ito::load_workspace_config() {
+                Ok(Some(cfg)) => cfg,
+                Ok(None) => {
+                    use std::io::{self, Write};
+                    use colored::Colorize;
+                    
+                    println!("{}", "No existe un Workspace configurado.\n".yellow().bold());
+                    println!("¿Dónde desea guardar sus proyectos?\n");
+                    println!("[1] Documentos/ITO (Recomendado)");
+                    println!("[2] Elegir otra carpeta\n");
+                    
+                    let chosen_path = loop {
+                        print!("Seleccione una opción: ");
+                        io::stdout().flush().ok();
+                        let mut option = String::new();
+                        if io::stdin().read_line(&mut option).is_err() {
+                            println!("{}", "Error al leer la entrada.".red());
+                            std::process::exit(1);
+                        }
+                        let option = option.trim();
+                        if option == "1" {
+                            match ito::get_default_workspace_path() {
+                                Ok(path) => {
+                                    break path;
+                                }
+                                Err(err) => {
+                                    println!("{}", format!("Error: {}", err).red());
+                                    std::process::exit(1);
+                                }
+                            }
+                        } else if option == "2" {
+                            print!("Ingrese la ruta absoluta para el Workspace: ");
+                            io::stdout().flush().ok();
+                            let mut path_input = String::new();
+                            if io::stdin().read_line(&mut path_input).is_err() {
+                                println!("{}", "Error al leer la ruta.".red());
+                                std::process::exit(1);
+                            }
+                            break std::path::PathBuf::from(path_input.trim());
+                        } else {
+                            println!("{}", "Opción inválida. Intente de nuevo.".yellow());
+                        }
+                    };
+                    if let Err(err) = ito::save_workspace_config(&chosen_path) {
+                        println!("{}", format!("❌ Error al guardar la configuración del Workspace: {}", err).red().bold());
+                        std::process::exit(1);
+                    }
+                    
+                    println!("✔ Workspace configurado en: {}\n", chosen_path.display().to_string().cyan());
+                    
+                    ito::models::ItoWorkspaceConfig {
+                        workspace: chosen_path.to_string_lossy().to_string(),
+                        version: "1.0".to_string(),
+                    }
+                }
+                Err(err) => {
+                    use colored::Colorize;
+                    println!("{}", format!("❌ Error al cargar configuración global: {}", err).red().bold());
+                    std::process::exit(1);
+                }
+            };
+
+            let ws_path = std::path::PathBuf::from(&ws_config.workspace);
+            let projects_dir = ws_path.join("Projects");
+
+            match ito::run_new(projects_dir, name) {
                 Ok((path, uuid)) => {
                     use colored::Colorize;
                     println!("✔ Proyecto creado correctamente.\n");
@@ -439,6 +516,57 @@ async fn main() -> Result<()> {
                     use colored::Colorize;
                     println!("{}", format!("❌ Error: {}", err).red().bold());
                     std::process::exit(1);
+                }
+            }
+        }
+        Commands::Workspace { subcommand } => {
+            match subcommand {
+                None => {
+                    use colored::Colorize;
+                    match ito::load_workspace_config() {
+                        Ok(Some(cfg)) => {
+                            let ws_path = std::path::PathBuf::from(&cfg.workspace);
+                            let count = ito::run_workspace_get_count(&ws_path);
+                            println!("{}", "Workspace actual".bold());
+                            println!("{}\n", ws_path.display().to_string().cyan());
+                            println!("{}", "Cantidad de proyectos:".bold());
+                            println!("{}", count.to_string().cyan().bold());
+                        }
+                        Ok(None) => {
+                            println!("{}", "No hay ningún Workspace configurado actualmente.".yellow());
+                            println!("Ejecuta 'ito new <NombreProyecto>' o 'ito workspace set' para configurarlo.");
+                        }
+                        Err(err) => {
+                            println!("{}", format!("❌ Error: {}", err).red().bold());
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Some(WorkspaceSubcommand::Set { path }) => {
+                    use std::io::{self, Write};
+                    use colored::Colorize;
+                    
+                    let chosen_path = match path {
+                        Some(p) => std::path::PathBuf::from(p),
+                        None => {
+                            print!("Ingrese la nueva ruta absoluta para el Workspace: ");
+                            io::stdout().flush().ok();
+                            let mut path_input = String::new();
+                            if io::stdin().read_line(&mut path_input).is_err() {
+                                println!("{}", "Error al leer la ruta.".red());
+                                std::process::exit(1);
+                            }
+                            std::path::PathBuf::from(path_input.trim())
+                        }
+                    };
+
+                    if let Err(err) = ito::save_workspace_config(&chosen_path) {
+                        println!("{}", format!("❌ Error al guardar el nuevo Workspace: {}", err).red().bold());
+                        std::process::exit(1);
+                    }
+
+                    println!("✔ Workspace actualizado correctamente a: {}\n", chosen_path.display().to_string().cyan());
+                    println!("{}", "Nota: Los proyectos existentes no han sido movidos automáticamente.".yellow());
                 }
             }
         }

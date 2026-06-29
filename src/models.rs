@@ -251,3 +251,9 @@ pub struct ItoProjectConfig {
     pub license: String,
     pub version: String,
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ItoWorkspaceConfig {
+    pub workspace: String,
+    pub version: String,
+}
