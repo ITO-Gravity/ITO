@@ -64,6 +64,10 @@ enum Commands {
     },
     /// Selecciona interactivamente un proyecto y copia la instrucción para navegar a él al portapapeles
     Select,
+    /// Vincula un directorio físico externo de un CAD o IDE a un módulo del proyecto de ITO
+    Link,
+    /// Muestra la lista consolidada de enlaces y módulos vinculados en el proyecto
+    Links,
 }
 
 #[tokio::main]
@@ -654,6 +658,129 @@ async fn main() -> Result<()> {
             println!("Ruta: {}", chosen_project.path.display().to_string().cyan());
             println!("\n📋 El comando de navegación ha sido copiado al portapapeles.");
             println!("Presiona {} / {} en tu terminal para ingresar al proyecto.", "Ctrl+V".bold(), "Click Derecho".bold());
+        }
+        Commands::Link => {
+            use std::io::{self, Write};
+            use colored::Colorize;
+
+            let current_dir = std::env::current_dir()?;
+            let root = match ito::find_project_root(&current_dir) {
+                Some(r) => r,
+                None => {
+                    println!("{}", "❌ Error: No se encontró la raíz del proyecto. ¿Ejecutaste 'ito init' o 'ito new' primero?".red().bold());
+                    std::process::exit(1);
+                }
+            };
+
+            println!("{}", "Vincular Módulo Externo".bold());
+            println!("¿Qué tipo de módulo desea vincular?\n");
+            println!("[1] Firmware");
+            println!("[2] Electrónica");
+            println!("[3] Mecánica");
+            println!("[4] Documentación");
+            println!("[5] Manufactura\n");
+
+            let (module_key, module_name) = loop {
+                print!("Seleccione una opción: ");
+                io::stdout().flush().ok();
+                let mut option = String::new();
+                if io::stdin().read_line(&mut option).is_err() {
+                    println!("{}", "Error al leer la opción.".red());
+                    std::process::exit(1);
+                }
+                match option.trim() {
+                    "1" => break ("firmware", "Firmware"),
+                    "2" => break ("electronics", "Electrónica"),
+                    "3" => break ("mechanical", "Mecánica"),
+                    "4" => break ("documentation", "Documentación"),
+                    "5" => break ("manufacturing", "Manufactura"),
+                    _ => println!("{}", "Opción inválida. Intente de nuevo.".yellow()),
+                }
+            };
+
+            print!("\nIngrese la ruta absoluta del proyecto de {}: ", module_name);
+            io::stdout().flush().ok();
+            let mut path_input = String::new();
+            if io::stdin().read_line(&mut path_input).is_err() {
+                println!("{}", "Error al leer la ruta.".red());
+                std::process::exit(1);
+            }
+            let target_path = std::path::PathBuf::from(path_input.trim());
+
+            match ito::run_link(root, module_key, target_path.clone()) {
+                Ok(tool) => {
+                    if tool == "Unknown" {
+                        println!("\n{}", "⚠ No se pudo identificar automáticamente el software de desarrollo en la carpeta.".yellow());
+                    } else {
+                        println!("\n✔ Proyecto {} detectado.", tool.green().bold());
+                    }
+                    println!("✔ Módulo {} vinculado correctamente a: {}\n", module_name.green().bold(), target_path.display().to_string().cyan());
+                }
+                Err(err) => {
+                    println!("{}", format!("❌ Error: {}", err).red().bold());
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::Links => {
+            use colored::Colorize;
+
+            let current_dir = std::env::current_dir()?;
+            let root = match ito::find_project_root(&current_dir) {
+                Some(r) => r,
+                None => {
+                    println!("{}", "❌ Error: No se encontró la raíz del proyecto. ¿Ejecutaste 'ito init' o 'ito new' primero?".red().bold());
+                    std::process::exit(1);
+                }
+            };
+
+            let ito_json_path = root.join("ito.json");
+            if !ito_json_path.exists() {
+                println!("{}", "❌ Error: No se encontró el archivo ito.json en el proyecto actual.".red().bold());
+                std::process::exit(1);
+            }
+
+            let content = match std::fs::read_to_string(&ito_json_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    println!("{}", format!("❌ Error al leer ito.json: {}", e).red().bold());
+                    std::process::exit(1);
+                }
+            };
+
+            let config: ito::models::ItoProjectConfig = match serde_json::from_str(&content) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    println!("{}", format!("❌ Error al parsear ito.json: {}", e).red().bold());
+                    std::process::exit(1);
+                }
+            };
+
+            println!("\n{}", "Proyecto actual".bold());
+            println!("{}\n", config.project_name.cyan().bold());
+            println!("{}", "Módulos vinculados".bold());
+
+            let modules = [
+                ("firmware", "Firmware"),
+                ("electronics", "Electrónica"),
+                ("mechanical", "Mecánica"),
+                ("documentation", "Documentación"),
+                ("manufacturing", "Manufactura"),
+            ];
+
+            let links_map = config.links.unwrap_or_default();
+
+            for (key, name) in &modules {
+                println!("\n{}", name.bold());
+                if let Some(link) = links_map.get(*key) {
+                    println!("  {}", "✔ Vinculado".green().bold());
+                    println!("  {}", link.tool.cyan());
+                    println!("  {}", link.path.dimmed());
+                } else {
+                    println!("  {}", "❌ No vinculado".red());
+                }
+            }
+            println!("");
         }
     }
 

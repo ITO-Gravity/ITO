@@ -239,6 +239,12 @@ pub struct ItoProjectModules {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ItoProjectLink {
+    pub path: String,
+    pub tool: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItoProjectConfig {
     pub format_version: String,
@@ -250,6 +256,8 @@ pub struct ItoProjectConfig {
     pub current_revision: String,
     pub license: String,
     pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub links: Option<std::collections::HashMap<String, ItoProjectLink>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

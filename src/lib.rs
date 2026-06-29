@@ -300,6 +300,7 @@ pub fn run_new(cwd: std::path::PathBuf, project_name: &str) -> Result<(std::path
         current_revision: "REV-0001".to_string(),
         license: "MIT".to_string(),
         version: "0.1.0".to_string(),
+        links: None,
     };
 
     let ito_json_path = project_dir.join("ito.json");
@@ -541,6 +542,111 @@ pub fn copy_to_clipboard(text: &str) {
     }
 }
 
+pub fn find_project_root(start_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut current = start_dir.to_path_buf();
+    loop {
+        if current.join("ito.json").is_file() || current.join(".ito").join("config.toml").is_file() {
+            return Some(current);
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    None
+}
+
+pub fn detect_tool_in_path(path: &std::path::Path) -> String {
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            let file_name_lower = file_name.to_lowercase();
+            
+            // Visual Studio
+            if file_name_lower.ends_with(".sln") {
+                return "Visual Studio".to_string();
+            }
+            // PlatformIO
+            if file_name_lower == "platformio.ini" {
+                return "PlatformIO".to_string();
+            }
+            // Arduino
+            if file_name_lower.ends_with(".ino") {
+                return "Arduino".to_string();
+            }
+            // KiCad
+            if file_name_lower.ends_with(".kicad_pro") || file_name_lower.ends_with(".kicad_pcb") {
+                return "KiCad".to_string();
+            }
+            // Altium
+            if file_name_lower.ends_with(".prjpcb") {
+                return "Altium Designer".to_string();
+            }
+            // Proteus
+            if file_name_lower.ends_with(".pdsprj") {
+                return "Proteus".to_string();
+            }
+            // Fusion360
+            if file_name_lower.ends_with(".f3d") {
+                return "Fusion360".to_string();
+            }
+            // SolidWorks
+            if file_name_lower.ends_with(".sldprt") || file_name_lower.ends_with(".sldasm") {
+                return "SolidWorks".to_string();
+            }
+            // FreeCAD
+            if file_name_lower.ends_with(".fcstd") {
+                return "FreeCAD".to_string();
+            }
+        }
+    }
+    
+    // Si no se encuentra ninguno en el raíz, buscar carpeta .vscode
+    if path.join(".vscode").is_dir() {
+        return "Visual Studio Code".to_string();
+    }
+
+    "Unknown".to_string()
+}
+
+pub fn run_link(project_root: std::path::PathBuf, module_key: &str, target_path: std::path::PathBuf) -> Result<String, String> {
+    if !target_path.is_dir() {
+        return Err(format!("La ruta especificada '{}' no es un directorio válido o no existe.", target_path.display()));
+    }
+
+    let ito_json_path = project_root.join("ito.json");
+    if !ito_json_path.exists() {
+        return Err("No se encontró el archivo ito.json en el proyecto actual. ¿Inicializaste el proyecto con 'ito init' o 'ito new'?".to_string());
+    }
+
+    // Cargar ito.json existente
+    let content = std::fs::read_to_string(&ito_json_path)
+        .map_err(|e| format!("Error al leer ito.json: {}", e))?;
+    let mut config: models::ItoProjectConfig = serde_json::from_str(&content)
+        .map_err(|e| format!("Error al parsear ito.json: {}", e))?;
+
+    // Detectar herramienta
+    let tool_detected = detect_tool_in_path(&target_path);
+
+    // Crear enlace
+    let link = models::ItoProjectLink {
+        path: target_path.to_string_lossy().to_string(),
+        tool: tool_detected.clone(),
+    };
+
+    // Actualizar sección de links
+    let mut links_map = config.links.unwrap_or_default();
+    links_map.insert(module_key.to_string(), link);
+    config.links = Some(links_map);
+
+    // Escribir ito.json actualizado
+    let updated_content = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Error al serializar config: {}", e))?;
+    std::fs::write(&ito_json_path, updated_content)
+        .map_err(|e| format!("Error al guardar ito.json: {}", e))?;
+
+    Ok(tool_detected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,6 +755,91 @@ mod tests {
         let projects = scan_directory_for_projects(&temp_dir);
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "Proj1");
+
+        // Limpiar
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_project_root_discovery() {
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-root-{}", unique_id));
+        let nested_dir = temp_dir.join("a").join("b").join("c");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+
+        // No hay proyecto todavía
+        assert!(find_project_root(&nested_dir).is_none());
+
+        // Crear ito.json en la raíz temporal
+        std::fs::write(temp_dir.join("ito.json"), "{}").unwrap();
+        
+        let found = find_project_root(&nested_dir);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap(), temp_dir);
+
+        // Limpiar
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_tool_detection() {
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-detect-{}", unique_id));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // 1. Caso Arduino
+        let arduino_dir = temp_dir.join("arduino");
+        std::fs::create_dir_all(&arduino_dir).unwrap();
+        std::fs::write(arduino_dir.join("sketch.ino"), "").unwrap();
+        assert_eq!(detect_tool_in_path(&arduino_dir), "Arduino");
+
+        // 2. Caso KiCad
+        let kicad_dir = temp_dir.join("kicad");
+        std::fs::create_dir_all(&kicad_dir).unwrap();
+        std::fs::write(kicad_dir.join("pcb.kicad_pcb"), "").unwrap();
+        assert_eq!(detect_tool_in_path(&kicad_dir), "KiCad");
+
+        // 3. Caso VS Code
+        let vscode_dir = temp_dir.join("vscode");
+        std::fs::create_dir_all(vscode_dir.join(".vscode")).unwrap();
+        assert_eq!(detect_tool_in_path(&vscode_dir), "Visual Studio Code");
+
+        // 4. Caso Desconocido
+        let unknown_dir = temp_dir.join("unknown");
+        std::fs::create_dir_all(&unknown_dir).unwrap();
+        assert_eq!(detect_tool_in_path(&unknown_dir), "Unknown");
+
+        // Limpiar
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_project_linking() {
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-link-{}", unique_id));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Crear estructura estándar de nuevo proyecto de ITO
+        let (p_path, _) = run_new(temp_dir.clone(), "MyProj").unwrap();
+
+        // Crear una carpeta de firmware simulada con PlatformIO
+        let fw_path = temp_dir.join("MyFirmware");
+        std::fs::create_dir_all(&fw_path).unwrap();
+        std::fs::write(fw_path.join("platformio.ini"), "").unwrap();
+
+        // Ejecutar link
+        let tool = run_link(p_path.clone(), "firmware", fw_path.clone()).unwrap();
+        assert_eq!(tool, "PlatformIO");
+
+        // Cargar config y verificar
+        let config_content = std::fs::read_to_string(p_path.join("ito.json")).unwrap();
+        let config: models::ItoProjectConfig = serde_json::from_str(&config_content).unwrap();
+        assert!(config.links.is_some());
+        let links = config.links.unwrap();
+        assert!(links.contains_key("firmware"));
+        let link = links.get("firmware").unwrap();
+        assert_eq!(link.path, fw_path.to_string_lossy().to_string());
+        assert_eq!(link.tool, "PlatformIO");
 
         // Limpiar
         std::fs::remove_dir_all(&temp_dir).ok();
