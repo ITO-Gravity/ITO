@@ -447,6 +447,74 @@ pub fn run_workspace_get_count(workspace_path: &std::path::Path) -> usize {
     count
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProjectInfo {
+    pub name: String,
+    pub path: std::path::PathBuf,
+}
+
+pub fn scan_directory_for_projects(dir: &std::path::Path) -> Vec<ProjectInfo> {
+    let mut projects = Vec::new();
+    
+    // Si el directorio en sí mismo es un proyecto
+    if dir.join(".ito").is_dir() || dir.join("ito.json").is_file() {
+        let name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("unnamed").to_string();
+        projects.push(ProjectInfo {
+            name,
+            path: dir.to_path_buf(),
+        });
+    }
+
+    // Escanear subdirectorios inmediatos
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.join(".ito").is_dir() || path.join("ito.json").is_file() {
+                    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("unnamed").to_string();
+                    projects.push(ProjectInfo {
+                        name,
+                        path,
+                    });
+                }
+            }
+        }
+    }
+    
+    // Ordenar alfabéticamente por nombre
+    projects.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    projects
+}
+
+pub fn copy_to_clipboard(text: &str) {
+    use std::process::{Command, Stdio};
+    use std::io::Write;
+    
+    if cfg!(target_os = "windows") {
+        if let Ok(mut child) = Command::new("clip").stdin(Stdio::piped()).spawn() {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(text.as_bytes()).ok();
+            }
+            child.wait().ok();
+        }
+    } else if cfg!(target_os = "macos") {
+        if let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(text.as_bytes()).ok();
+            }
+            child.wait().ok();
+        }
+    } else {
+        // En Linux intentamos xclip
+        if let Ok(mut child) = Command::new("xclip").arg("-selection").arg("clipboard").stdin(Stdio::piped()).spawn() {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(text.as_bytes()).ok();
+            }
+            child.wait().ok();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,5 +603,28 @@ mod tests {
         } else {
             std::env::remove_var("HOME");
         }
+    }
+
+    #[test]
+    fn test_scan_directory_for_projects() {
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-scan-{}", unique_id));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // 1. Crear subdirectorio que sea proyecto
+        let proj1_dir = temp_dir.join("Proj1");
+        std::fs::create_dir_all(proj1_dir.join(".ito")).unwrap();
+
+        // 2. Crear subdirectorio que no sea proyecto
+        let non_proj_dir = temp_dir.join("NonProj");
+        std::fs::create_dir_all(non_proj_dir).unwrap();
+
+        // Escanear
+        let projects = scan_directory_for_projects(&temp_dir);
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "Proj1");
+
+        // Limpiar
+        std::fs::remove_dir_all(&temp_dir).ok();
     }
 }

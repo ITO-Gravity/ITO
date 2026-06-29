@@ -62,6 +62,8 @@ enum Commands {
         #[command(subcommand)]
         subcommand: Option<WorkspaceSubcommand>,
     },
+    /// Selecciona interactivamente un proyecto y copia la instrucción para navegar a él al portapapeles
+    Select,
 }
 
 #[tokio::main]
@@ -569,6 +571,89 @@ async fn main() -> Result<()> {
                     println!("{}", "Nota: Los proyectos existentes no han sido movidos automáticamente.".yellow());
                 }
             }
+        }
+        Commands::Select => {
+            use std::io::{self, Write};
+            use colored::Colorize;
+
+            println!("{}", "Selección de Proyecto de Hardware".bold());
+            println!("¿Dónde desea buscar proyectos?\n");
+            println!("[1] Workspace de ITO");
+            println!("[2] Directorio actual de la terminal\n");
+
+            let explore_path = loop {
+                print!("Seleccione una opción: ");
+                io::stdout().flush().ok();
+                let mut option = String::new();
+                if io::stdin().read_line(&mut option).is_err() {
+                    println!("{}", "Error al leer la entrada.".red());
+                    std::process::exit(1);
+                }
+                let option = option.trim();
+                if option == "1" {
+                    match ito::load_workspace_config() {
+                        Ok(Some(cfg)) => {
+                            break std::path::PathBuf::from(&cfg.workspace).join("Projects");
+                        }
+                        Ok(None) => {
+                            println!("{}", "No hay ningún Workspace configurado actualmente.".yellow());
+                            println!("Configúrelo primero con 'ito workspace set' o corra 'ito new <Nombre>'.");
+                            std::process::exit(1);
+                        }
+                        Err(err) => {
+                            println!("{}", format!("❌ Error: {}", err).red().bold());
+                            std::process::exit(1);
+                        }
+                    }
+                } else if option == "2" {
+                    match std::env::current_dir() {
+                        Ok(dir) => break dir,
+                        Err(err) => {
+                            println!("{}", format!("Error al obtener directorio actual: {}", err).red());
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    println!("{}", "Opción inválida. Intente de nuevo.".yellow());
+                }
+            };
+
+            let projects = ito::scan_directory_for_projects(&explore_path);
+            if projects.is_empty() {
+                println!("{}", "\nNo se encontraron proyectos de ITO en la ubicación seleccionada.".yellow());
+                std::process::exit(0);
+            }
+
+            println!("\nProyectos encontrados:");
+            for (idx, proj) in projects.iter().enumerate() {
+                println!("  [{}] {} ({})", (idx + 1).to_string().cyan().bold(), proj.name.bold(), proj.path.display().to_string().dimmed());
+            }
+            println!("");
+
+            let chosen_project = loop {
+                print!("Seleccione el número del proyecto en el que desea trabajar: ");
+                io::stdout().flush().ok();
+                let mut selection_input = String::new();
+                if io::stdin().read_line(&mut selection_input).is_err() {
+                    println!("{}", "Error al leer la selección.".red());
+                    std::process::exit(1);
+                }
+                let selection_input = selection_input.trim();
+                if let Ok(idx) = selection_input.parse::<usize>() {
+                    if idx > 0 && idx <= projects.len() {
+                        break &projects[idx - 1];
+                    }
+                }
+                println!("{}", "Número inválido. Intente de nuevo.".yellow());
+            };
+
+            let cd_command = format!("cd \"{}\"", chosen_project.path.display());
+            ito::copy_to_clipboard(&cd_command);
+
+            println!("\n✔ Proyecto seleccionado: {}", chosen_project.name.cyan().bold());
+            println!("Ruta: {}", chosen_project.path.display().to_string().cyan());
+            println!("\n📋 El comando de navegación ha sido copiado al portapapeles.");
+            println!("Presiona {} / {} en tu terminal para ingresar al proyecto.", "Ctrl+V".bold(), "Click Derecho".bold());
         }
     }
 
