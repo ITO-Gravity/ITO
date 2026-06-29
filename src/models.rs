@@ -227,3 +227,27 @@ mod tests {
         }));
     }
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItoProjectModules {
+    pub firmware: bool,
+    pub electronics: bool,
+    pub mechanical: bool,
+    pub documentation: bool,
+    pub manufacturing: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItoProjectConfig {
+    pub format_version: String,
+    pub project_name: String,
+    pub project_uuid: String,
+    pub created_at: String,
+    pub created_by: String,
+    pub modules: ItoProjectModules,
+    pub current_revision: String,
+    pub license: String,
+    pub version: String,
+}

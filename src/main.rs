@@ -43,6 +43,11 @@ enum Commands {
         #[arg(short, long)]
         quiet: bool,
     },
+    /// Crea una estructura de carpetas estándar para un nuevo proyecto multidisciplinar
+    New {
+        /// Nombre del nuevo proyecto
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -416,6 +421,25 @@ async fn main() -> Result<()> {
 
             if critical_count > 0 {
                 std::process::exit(1);
+            }
+        }
+        Commands::New { name } => {
+            let current_dir = std::env::current_dir()?;
+            
+            match ito::run_new(current_dir, name) {
+                Ok((path, uuid)) => {
+                    use colored::Colorize;
+                    println!("✔ Proyecto creado correctamente.\n");
+                    println!("Proyecto: {}", name.cyan().bold());
+                    println!("UUID: {}", uuid.cyan());
+                    println!("Ubicación: {}\n", path.display().to_string().cyan());
+                    println!("{}", "ITO está listo para comenzar el versionado.".green().bold());
+                }
+                Err(err) => {
+                    use colored::Colorize;
+                    println!("{}", format!("❌ Error: {}", err).red().bold());
+                    std::process::exit(1);
+                }
             }
         }
     }

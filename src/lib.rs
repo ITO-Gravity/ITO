@@ -234,3 +234,155 @@ fn get_mime_type_from_filename(filename: &str) -> &'static str {
         _ => "application/octet-stream",
     }
 }
+
+pub fn run_new(cwd: std::path::PathBuf, project_name: &str) -> Result<(std::path::PathBuf, String), String> {
+    let project_dir = cwd.join(project_name);
+    
+    // 1. Validar que el proyecto no exista
+    if project_dir.exists() {
+        return Err(format!("Error: El directorio '{}' ya existe.", project_dir.display()));
+    }
+    
+    // 2. Crear las carpetas de la estructura recursivamente
+    let dirs_to_create = [
+        "",
+        "firmware",
+        "electronics",
+        "electronics/pcb",
+        "electronics/schematics",
+        "electronics/libraries",
+        "mechanical",
+        "mechanical/cad",
+        "mechanical/drawings",
+        "documentation",
+        "manufacturing",
+        "assets",
+        "scripts",
+        "tests",
+        ".ito",
+        ".ito/backups",
+        ".ito/history",
+        ".ito/cache",
+        ".ito/objects",
+        ".ito/logs",
+    ];
+
+    for sub_dir in &dirs_to_create {
+        let path = if sub_dir.is_empty() {
+            project_dir.clone()
+        } else {
+            project_dir.join(sub_dir)
+        };
+        std::fs::create_dir_all(&path)
+            .map_err(|e| format!("Error al crear el directorio '{}': {}", path.display(), e))?;
+    }
+
+    // 3. Generar archivo ito.json
+    let project_uuid = uuid::Uuid::new_v4().to_string();
+    let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let created_by = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    let config = models::ItoProjectConfig {
+        format_version: "1.0".to_string(),
+        project_name: project_name.to_string(),
+        project_uuid: project_uuid.clone(),
+        created_at,
+        created_by,
+        modules: models::ItoProjectModules {
+            firmware: true,
+            electronics: true,
+            mechanical: true,
+            documentation: true,
+            manufacturing: true,
+        },
+        current_revision: "REV-0001".to_string(),
+        license: "MIT".to_string(),
+        version: "0.1.0".to_string(),
+    };
+
+    let ito_json_path = project_dir.join("ito.json");
+    let json_content = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Error al serializar ito.json: {}", e))?;
+    std::fs::write(&ito_json_path, json_content)
+        .map_err(|e| format!("Error al escribir ito.json: {}", e))?;
+
+    // 4. Generar archivo README.md
+    let readme_path = project_dir.join("README.md");
+    let readme_content = format!(
+        "# {}\n\nProyecto multidisciplinar de ingeniería inicializado con ITO.\n\n\
+         ## Módulos del proyecto\n\
+         - **Firmware**: Código fuente del firmware.\n\
+         - **Electronics**: Diseño electrónico, esquemas y PCBs.\n\
+         - **Mechanical**: Planos mecánicos y CAD.\n\
+         - **Documentation**: Manuales, datasheets y guías.\n\
+         - **Manufacturing**: Archivos de fabricación (Gerbers, BOM, DXF).\n",
+        project_name
+    );
+    std::fs::write(&readme_path, readme_content)
+        .map_err(|e| format!("Error al escribir README.md: {}", e))?;
+
+    // 5. Generar archivo LICENSE (MIT por defecto)
+    let license_path = project_dir.join("LICENSE");
+    let current_year = chrono::Utc::now().format("%Y").to_string();
+    let license_content = format!(
+        "MIT License\n\n\
+         Copyright (c) {} {}\n\n\
+         Permission is hereby granted, free of charge, to any person obtaining a copy\n\
+         of this software and associated documentation files (the \"Software\"), to deal\n\
+         in the Software without restriction, including without limitation the rights\n\
+         to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n\
+         copies of the Software, and to permit persons to whom the Software is\n\
+         furnished to do so, subject to the following conditions:\n\n\
+         The above copyright notice and this permission notice shall be included in all\n\
+         copies or substantial portions of the Software.\n\n\
+         THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n\
+         IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n\
+         FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n\
+         AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n\
+         LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n\
+         OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n\
+         SOFTWARE.\n",
+        current_year, config.created_by
+    );
+    std::fs::write(&license_path, license_content)
+        .map_err(|e| format!("Error al escribir LICENSE: {}", e))?;
+
+    Ok((project_dir, project_uuid))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_run_new_creation() {
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-test-{}", unique_id));
+        let project_name = "TestProject";
+        
+        let (project_path, uuid) = run_new(temp_dir.clone(), project_name).unwrap();
+        
+        assert_eq!(project_path, temp_dir.join(project_name));
+        assert!(!uuid.is_empty());
+        
+        // Verificar carpetas
+        assert!(project_path.join("firmware").is_dir());
+        assert!(project_path.join("electronics/pcb").is_dir());
+        assert!(project_path.join("mechanical/cad").is_dir());
+        assert!(project_path.join(".ito/backups").is_dir());
+        
+        // Verificar archivos
+        assert!(project_path.join("ito.json").is_file());
+        assert!(project_path.join("README.md").is_file());
+        assert!(project_path.join("LICENSE").is_file());
+        
+        // Intentar crear el mismo proyecto de nuevo debe dar error
+        let err_res = run_new(temp_dir.clone(), project_name);
+        assert!(err_res.is_err());
+
+        // Limpiar
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+}
