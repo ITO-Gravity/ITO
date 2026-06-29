@@ -358,8 +358,34 @@ pub fn get_default_workspace_path() -> Result<std::path::PathBuf, String> {
     } else {
         std::env::var("HOME").ok()
     };
-    home.map(|h| std::path::PathBuf::from(h).join("Documents").join("ITO"))
-        .ok_or_else(|| "No se pudo determinar el directorio de inicio (Home) del usuario.".to_string())
+    let home_path = home.map(std::path::PathBuf::from)
+        .ok_or_else(|| "No se pudo determinar el directorio de inicio (Home) del usuario.".to_string())?;
+
+    if cfg!(target_os = "windows") {
+        let candidates = [
+            home_path.join("OneDrive").join("Documentos"),
+            home_path.join("OneDrive").join("Documents"),
+            home_path.join("Documentos"),
+            home_path.join("Documents"),
+        ];
+        for candidate in &candidates {
+            if candidate.exists() {
+                return Ok(candidate.join("ITO"));
+            }
+        }
+        Ok(home_path.join("Documents").join("ITO"))
+    } else {
+        let candidates = [
+            home_path.join("Documents"),
+            home_path.join("Documentos"),
+        ];
+        for candidate in &candidates {
+            if candidate.exists() {
+                return Ok(candidate.join("ITO"));
+            }
+        }
+        Ok(home_path.join("Documents").join("ITO"))
+    }
 }
 
 pub fn get_global_config_pointer_path() -> Result<std::path::PathBuf, String> {
