@@ -678,7 +678,8 @@ async fn main() -> Result<()> {
             println!("[2] Electrónica");
             println!("[3] Mecánica");
             println!("[4] Documentación");
-            println!("[5] Manufactura\n");
+            println!("[5] Manufactura");
+            println!("[6] Volver atrás\n");
 
             let (module_key, module_name) = loop {
                 print!("Seleccione una opción: ");
@@ -694,6 +695,10 @@ async fn main() -> Result<()> {
                     "3" => break ("mechanical", "Mecánica"),
                     "4" => break ("documentation", "Documentación"),
                     "5" => break ("manufacturing", "Manufactura"),
+                    "6" => {
+                        println!("{}", "Vinculación cancelada.".yellow());
+                        return Ok(());
+                    }
                     _ => println!("{}", "Opción inválida. Intente de nuevo.".yellow()),
                 }
             };
