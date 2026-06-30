@@ -119,40 +119,88 @@ async fn main() -> Result<()> {
         Commands::Status => {
             let current_dir = std::env::current_dir()?;
             
-            // 1. Resolver la raíz del proyecto (usando el resolvedor inteligente)
             if let Some(root) = ito::find_project_root(&current_dir) {
-                // Leer ito.json de la raíz para obtener el nombre del proyecto
                 let ito_json_path = root.join("ito.json");
                 let mut project_name = "Proyecto Ito".to_string();
+                let mut links = std::collections::HashMap::new();
+
                 if ito_json_path.exists() {
                     if let Ok(content) = std::fs::read_to_string(&ito_json_path) {
                         if let Ok(config) = serde_json::from_str::<models::ItoProjectConfig>(&content) {
                             project_name = config.project_name;
+                            links = config.links.unwrap_or_default();
                         }
                     }
                 }
 
-                // Comprobar si estamos parados dentro de un módulo vinculado de dicho proyecto
-                if let Some((_module_key, module_name)) = ito::find_linked_module_in_project(&root, &current_dir) {
-                    println!("\n{} | Módulo: {}", project_name.cyan().bold(), module_name.bold());
-                    println!("Ubicación: {}\n", current_dir.display().to_string().cyan());
+                println!("\n{} {}", "Proyecto:".bold(), project_name.cyan().bold());
+                println!("{} {}\n", "Raíz:".bold(), root.display().to_string().cyan());
+
+                if links.is_empty() {
+                    println!("{} (Sin módulos enlazados - Analizando raíz)", "Electrónica".bold());
+                    match parsers::parse_project_directory(&current_dir) {
+                        Ok(design) => {
+                            println!("  ✔ CAD/Esquema: {} componentes cargados.", design.components.len());
+                            println!("  ✔ Nets: {} conexiones eléctricas encontradas.", design.nets.len());
+                        }
+                        Err(e) => {
+                            println!("  ⚠ No se encontraron archivos de hardware válidos en la raíz: {}", e);
+                        }
+                    }
                 } else {
-                    println!("\n{}", project_name.cyan().bold());
-                    println!("Ubicación: (Raíz del proyecto)\n");
+                    let registry = ito::engines::EngineRegistry::new();
+                    
+                    let disciplines = [
+                        ("firmware", "Firmware"),
+                        ("electronics", "Electrónica"),
+                        ("mechanical", "Mecánica"),
+                        ("documentation", "Documentación"),
+                        ("manufacturing", "Manufactura"),
+                    ];
+
+                    for &(key, name) in &disciplines {
+                        if let Some(link) = links.get(key) {
+                            let module_path = std::path::PathBuf::from(&link.path);
+                            let engine = registry.get_engine(&link.engine)
+                                .unwrap_or_else(|| registry.get_engine("file-hash").unwrap());
+                            
+                            let m_cache_dir = root.join(".ito").join("cache").join(key);
+                            
+                            let is_current = current_dir.to_string_lossy().to_lowercase().replace('\\', "/")
+                                .starts_with(&module_path.to_string_lossy().to_lowercase().replace('\\', "/"));
+                            
+                            let current_marker = if is_current { " (consola aquí)" } else { "" };
+                            println!("{}{}", name.bold(), current_marker.dimmed());
+
+                            match engine.status(&module_path, &m_cache_dir) {
+                                Ok(ito::engines::ModuleStatus::Unchanged) => {
+                                    println!("  {}", "Sin cambios".green());
+                                }
+                                Ok(ito::engines::ModuleStatus::Modified { summary, details }) => {
+                                    println!("  ✔ {}", summary.yellow());
+                                    for detail in details.iter().take(5) {
+                                        println!("    {}", detail.dimmed());
+                                    }
+                                    if details.len() > 5 {
+                                        println!("    ... y {} cambios más.", details.len() - 5);
+                                    }
+                                }
+                                Ok(ito::engines::ModuleStatus::Error(e)) => {
+                                    println!("  ⚠ Error de análisis: {}", e.red());
+                                }
+                                Err(e) => {
+                                    println!("  ⚠ Error: {}", e.red());
+                                }
+                            }
+                            println!();
+                        }
+                    }
                 }
             } else {
                 println!("{}", "⚠ No se detectó ninguna relación con un proyecto de Ito activo.".yellow());
             }
 
-            println!("Analizando estado semántico del hardware...");
-            
-            let design = parsers::parse_project_directory(&current_dir)?;
-            let cad_comp_count = design.components.len();
-            let net_count = design.nets.len();
-
-            println!("  CAD/Esquema: {} componentes cargados.", cad_comp_count);
-            println!("  Nets: {} conexiones eléctricas encontradas.", net_count);
-            println!("\n💡 {} Si realizaste modificaciones, puedes comparar los cambios semánticos con: {}", "Consejo:".bold(), "ito diff".cyan());
+            println!("💡 {} Si realizaste modificaciones, puedes comparar los cambios semánticos con: {}", "Consejo:".bold(), "ito diff".cyan());
             println!("💡 {} Si estás listo para guardar esta versión localmente, ejecuta: {}", "Consejo:".bold(), "ito commit -m \"Mensaje\"".cyan());
         }
         Commands::Diff { path, json } => {
@@ -411,9 +459,25 @@ async fn main() -> Result<()> {
         }
         Commands::Commit { message, force } => {
             let current_dir = std::env::current_dir()?;
+            let project_root = ito::find_project_root(&current_dir).unwrap_or(current_dir.clone());
+            let mut electronics_path = current_dir.clone();
             
-            // Ejecutar linter antes de hacer commit
-            if let Ok(design) = parsers::parse_project_directory(&current_dir) {
+            // Buscar si hay un link de electronics en ito.json
+            let ito_json_path = project_root.join("ito.json");
+            if ito_json_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&ito_json_path) {
+                    if let Ok(config) = serde_json::from_str::<models::ItoProjectConfig>(&content) {
+                        if let Some(links) = config.links {
+                            if let Some(link) = links.get("electronics") {
+                                electronics_path = std::path::PathBuf::from(&link.path);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Ejecutar linter antes de hacer commit en la ruta de electrónica
+            if let Ok(design) = parsers::parse_project_directory(&electronics_path) {
                 let issues = linter::run_lint(&design);
                 let critical_count = issues.iter().filter(|i| i.severity == linter::LintSeverity::Critical).count();
                 if critical_count > 0 && !*force {
@@ -430,7 +494,7 @@ async fn main() -> Result<()> {
                 }
             }
 
-            match ito::run_commit(current_dir, message.clone()) {
+            match ito::run_commit(project_root, message.clone()) {
                 Ok(commit) => {
                     use colored::Colorize;
                     println!("{}", "✔ Respaldo de diseño guardado localmente con éxito.".green().bold());
@@ -438,7 +502,16 @@ async fn main() -> Result<()> {
                     println!("Mensaje: {}", commit.message.bold());
                     println!("Fecha:   {}", commit.timestamp.dimmed());
 
-                    if let Some(ref summary) = commit.diff_summary {
+                    if !commit.modules.is_empty() {
+                        println!("\nResumen por módulo:");
+                        for (mod_name, payload) in &commit.modules {
+                            let status_indicator = if payload.changes_detected { "✔".yellow() } else { "✔".green() };
+                            println!("  {} [{}]: {}", status_indicator, mod_name.bold(), payload.engine_name.cyan());
+                            for detail in &payload.details {
+                                println!("    {}", detail.dimmed());
+                            }
+                        }
+                    } else if let Some(ref summary) = commit.diff_summary {
                         println!("\nResumen de cambios:");
                         println!(
                             "  Componentes: {} añadidos, {} eliminados, {} modificados",

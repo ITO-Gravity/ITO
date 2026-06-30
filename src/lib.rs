@@ -2,9 +2,9 @@ pub mod models;
 pub mod parsers;
 pub mod diff;
 pub mod linter;
+pub mod engines;
 
 use sha2::{Sha256, Digest};
-use std::io::Write;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct Config {
@@ -32,6 +32,8 @@ pub struct CommitEntry {
     pub synced: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff_summary: Option<DiffSummary>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub modules: std::collections::HashMap<String, engines::CommitPayload>,
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize, Clone)]
@@ -45,57 +47,64 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
         return Err("No se encontró la carpeta oculta .ito. ¿Inicializaste el proyecto con 'ito new' o 'ito init'?".to_string());
     }
 
-    // 1. Localizar archivos originales de hardware en la carpeta del proyecto
-    let mut cad_file_path = None;
-    let mut bom_file_path = None;
-    
-    if let Ok(entries) = std::fs::read_dir(&project_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                    let ext_lower = ext.to_lowercase();
-                    if ext_lower == "kicad_pcb" || ext_lower == "kicad_sch" || ext_lower == "brd" || ext_lower == "edif" || ext_lower == "edf" || (ext_lower == "sch" && !path.to_string_lossy().contains("bom")) {
-                        cad_file_path = Some(path);
-                    } else if ext_lower == "xlsx" || ext_lower == "xls" || (ext_lower == "csv" && path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase().contains("bom")) {
-                        bom_file_path = Some(path);
-                    }
-                }
+    // 1. Cargar configuración de ito.json para obtener los módulos activos
+    let ito_json_path = project_dir.join("ito.json");
+    let mut config: Option<models::ItoProjectConfig> = None;
+    if ito_json_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&ito_json_path) {
+            config = serde_json::from_str(&content).ok();
+        }
+    }
+
+    let registry = engines::EngineRegistry::new();
+    let mut active_modules = Vec::new();
+    if let Some(ref cfg) = config {
+        if let Some(ref links) = cfg.links {
+            for (key, link) in links {
+                active_modules.push((key.clone(), std::path::PathBuf::from(&link.path), link.engine.clone()));
             }
         }
     }
 
-    let cad_path = cad_file_path.unwrap_or_else(|| project_dir.join("design.json"));
-    if !cad_path.exists() {
-        return Err("No se encontró ningún archivo de diseño de hardware (design.json, .kicad_pcb, .sch, .brd, .edif)".to_string());
+    // Si no hay módulos vinculados, usar el fallback tradicional (root del proyecto con semantic-cad)
+    if active_modules.is_empty() {
+        active_modules.push((
+            "electronics".to_string(),
+            project_dir.clone(),
+            "semantic-cad".to_string()
+        ));
     }
 
-    let bom_path = bom_file_path.unwrap_or_else(|| project_dir.join("bom.csv"));
+    // 2. Generar el hash de estado unificado combinando los metadatos de todos los módulos
+    let mut state_hasher = Sha256::new();
+    if let Some(ref msg) = message {
+        state_hasher.update(msg.as_bytes());
+    }
 
-    let cad_bytes = std::fs::read(&cad_path)
-        .map_err(|e| format!("Error al leer el archivo de diseño {}: {}", cad_path.display(), e))?;
+    for (key, module_path, engine_name) in &active_modules {
+        state_hasher.update(key.as_bytes());
+        state_hasher.update(engine_name.as_bytes());
         
-    let bom_bytes = if bom_path.exists() {
-        Some(std::fs::read(&bom_path).map_err(|e| format!("Error al leer el archivo BOM {}: {}", bom_path.display(), e))?)
-    } else {
-        None
-    };
-
-    let cad_filename = cad_path.file_name().and_then(|s| s.to_str()).unwrap_or("design.json").to_string();
-    let bom_filename = if bom_bytes.is_some() {
-        Some(bom_path.file_name().and_then(|s| s.to_str()).unwrap_or("bom.csv").to_string())
-    } else {
-        None
-    };
-
-    // 2. Calcular hash SHA-256 de los archivos originales
-    let mut hasher = Sha256::new();
-    hasher.update(&cad_bytes);
-    if let Some(ref b_bytes) = bom_bytes {
-        hasher.update(b_bytes);
+        let m_cache_dir = project_dir.join(".ito").join("cache").join(key);
+        let engine = registry.get_engine(engine_name).unwrap_or_else(|| registry.get_engine("file-hash").unwrap());
+        
+        match engine.status(module_path, &m_cache_dir) {
+            Ok(engines::ModuleStatus::Modified { summary, details }) => {
+                state_hasher.update(summary.as_bytes());
+                for d in details {
+                    state_hasher.update(d.as_bytes());
+                }
+            }
+            Ok(engines::ModuleStatus::Unchanged) => {
+                state_hasher.update(b"unchanged");
+            }
+            _ => {
+                state_hasher.update(b"error");
+            }
+        }
     }
-    
-    let hash_result = hasher.finalize();
+
+    let hash_result = state_hasher.finalize();
     let hash_str = format!("{:x}", hash_result);
 
     // 3. Cargar historial local
@@ -114,73 +123,58 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
         .map(|c| c.hash.clone())
         .unwrap_or_else(|| "0000000000000000000000000000000000000000000000000000000000000000".to_string());
 
-    // Si el hash coincide con el último commit, no hay cambios
     if hash_str == parent_hash {
-        return Err("No hay cambios pendientes de hardware para respaldar ni sincronizar.".to_string());
+        return Err("No hay cambios pendientes en ningún módulo para confirmar.".to_string());
     }
 
-    // 4. Calcular diferencia semántica (diff) comparando con la caché actual (que representa el parent_hash)
-    let cache_dir = project_dir.join(".ito").join("cache");
-    let old_design = if cache_dir.exists() {
-        parsers::parse_project_directory(&cache_dir).unwrap_or_else(|_| models::HardwareDesign::new())
-    } else {
-        models::HardwareDesign::new()
-    };
+    // 4. Ejecutar commits en cada motor activo
+    let mut modules_payload = std::collections::HashMap::new();
+    let mut diff_summary = None;
 
-    let new_design = parsers::parse_project_directory(&project_dir)
-        .unwrap_or_else(|_| models::HardwareDesign::new());
+    for (key, module_path, engine_name) in active_modules {
+        let engine = registry.get_engine(&engine_name).unwrap_or_else(|| registry.get_engine("file-hash").unwrap());
+        let m_backup_dir = project_dir.join(".ito").join("backups").join(&hash_str).join(&key);
+        let m_cache_dir = project_dir.join(".ito").join("cache").join(&key);
+        
+        // Calcular diff_summary antes de actualizar la caché si es electrónica
+        let diff_summary_val = if key == "electronics" {
+            let old_design = parsers::parse_project_directory(&m_cache_dir).unwrap_or_else(|_| models::HardwareDesign::new());
+            let new_design = parsers::parse_project_directory(&module_path).unwrap_or_else(|_| models::HardwareDesign::new());
+            let diff_result = diff::diff_designs(&old_design, &new_design);
+            Some(DiffSummary {
+                added_components: diff_result.components.added.len(),
+                deleted_components: diff_result.components.deleted.len(),
+                modified_components: diff_result.components.modified.len(),
+                added_nets: diff_result.nets.added.len(),
+                deleted_nets: diff_result.nets.deleted.len(),
+                modified_nets: diff_result.nets.modified.len(),
+            })
+        } else {
+            None
+        };
 
-    let diff_result = diff::diff_designs(&old_design, &new_design);
-    let diff_summary = DiffSummary {
-        added_components: diff_result.components.added.len(),
-        deleted_components: diff_result.components.deleted.len(),
-        modified_components: diff_result.components.modified.len(),
-        added_nets: diff_result.nets.added.len(),
-        deleted_nets: diff_result.nets.deleted.len(),
-        modified_nets: diff_result.nets.modified.len(),
-    };
+        let payload = engine.commit(&module_path, &m_backup_dir, &m_cache_dir)?;
 
-    // 5. Crear la carpeta de respaldos y el ZIP
-    let backups_dir = project_dir.join(".ito").join("backups");
-    std::fs::create_dir_all(&backups_dir)
-        .map_err(|e| format!("Error al crear carpeta backups: {}", e))?;
-    let zip_path = backups_dir.join(format!("{}.zip", hash_str));
-    let zip_file = std::fs::File::create(&zip_path)
-        .map_err(|e| format!("Error al crear archivo zip: {}", e))?;
-    let mut zip = zip::ZipWriter::new(zip_file);
-
-    let options = zip::write::FileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
-
-    // Adjuntar archivo CAD original al ZIP
-    zip.start_file(&cad_filename, options)
-        .map_err(|e| format!("Error al añadir {} al zip: {}", cad_filename, e))?;
-    zip.write_all(&cad_bytes)
-        .map_err(|e| format!("Error al escribir {} al zip: {}", cad_filename, e))?;
-
-    // Adjuntar archivo BOM original al ZIP (si existe)
-    if let (Some(ref b_filename), Some(ref b_bytes)) = (&bom_filename, &bom_bytes) {
-        zip.start_file(b_filename, options)
-            .map_err(|e| format!("Error al añadir {} al zip: {}", b_filename, e))?;
-        zip.write_all(b_bytes)
-            .map_err(|e| format!("Error al escribir {} al zip: {}", b_filename, e))?;
+        if key == "electronics" {
+            diff_summary = diff_summary_val;
+        }
+        
+        modules_payload.insert(key, payload);
     }
-    zip.finish()
-        .map_err(|e| format!("Error al finalizar zip: {}", e))?;
 
-    // 6. Registrar en el historial local
+    // 5. Guardar commit en el historial
     let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let commit_msg = message.clone().unwrap_or_else(|| "Respaldo local de hardware".to_string());
-    let relative_zip_path = format!(".ito/backups/{}.zip", hash_str);
+    let commit_msg = message.unwrap_or_else(|| "Respaldo local del proyecto".to_string());
 
     let commit_entry = CommitEntry {
         hash: hash_str.clone(),
         parent_hash: parent_hash.clone(),
-        message: commit_msg.clone(),
+        message: commit_msg,
         timestamp,
-        zip_path: relative_zip_path,
+        zip_path: format!(".ito/backups/{}", hash_str),
         synced: true,
-        diff_summary: Some(diff_summary),
+        diff_summary,
+        modules: modules_payload,
     };
 
     history.commits.push(commit_entry.clone());
@@ -188,17 +182,6 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
         .map_err(|e| format!("Error al serializar historial: {}", e))?;
     std::fs::write(&history_path, history_str)
         .map_err(|e| format!("Error al escribir historial: {}", e))?;
-
-    // 7. Actualizar la caché local para 'ito diff'
-    if cache_dir.exists() {
-        std::fs::remove_dir_all(&cache_dir).ok();
-    }
-    std::fs::create_dir_all(&cache_dir).ok();
-    
-    std::fs::write(cache_dir.join(&cad_filename), &cad_bytes).ok();
-    if let (Some(ref b_filename), Some(ref b_bytes)) = (&bom_filename, &bom_bytes) {
-        std::fs::write(cache_dir.join(b_filename), b_bytes).ok();
-    }
 
     Ok(commit_entry)
 }
@@ -219,75 +202,59 @@ pub fn run_restore(project_dir: std::path::PathBuf, target_hash: &str) -> Result
     let matched_commit = history.commits.iter().find(|c| c.hash.starts_with(target_hash))
         .ok_or_else(|| format!("No se encontró ninguna versión con el prefijo de hash '{}'.", target_hash))?;
 
-    // 3. Abrir el archivo zip
-    let absolute_zip_path = project_dir.join(&matched_commit.zip_path);
-    if !absolute_zip_path.exists() {
-        return Err(format!("No se encontró el archivo de respaldo en la ruta: {}", absolute_zip_path.display()));
-    }
+    let registry = engines::EngineRegistry::new();
+    let mut restored_modules = Vec::new();
 
-    let file = std::fs::File::open(&absolute_zip_path)
-        .map_err(|e| format!("Error al abrir archivo de respaldo ZIP: {}", e))?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| format!("Error al leer el archivo ZIP: {}", e))?;
-
-    // 4. Limpiar los archivos CAD/BOM activos antes de extraer los nuevos
-    let mut active_cad_path = None;
-    let mut active_bom_path = None;
-    if let Ok(entries) = std::fs::read_dir(&project_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                    let ext_lower = ext.to_lowercase();
-                    if ext_lower == "kicad_pcb" || ext_lower == "kicad_sch" || ext_lower == "brd" || ext_lower == "edif" || ext_lower == "edf" || (ext_lower == "sch" && !path.to_string_lossy().contains("bom")) {
-                        active_cad_path = Some(path);
-                    } else if ext_lower == "xlsx" || ext_lower == "xls" || (ext_lower == "csv" && path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase().contains("bom")) {
-                        active_bom_path = Some(path);
-                    }
+    // 3. Restauración modular transaccional
+    if !matched_commit.modules.is_empty() {
+        let ito_json_path = project_dir.join("ito.json");
+        let mut links = std::collections::HashMap::new();
+        if ito_json_path.exists() {
+            if let Ok(c) = std::fs::read_to_string(&ito_json_path) {
+                if let Ok(config) = serde_json::from_str::<models::ItoProjectConfig>(&c) {
+                    links = config.links.unwrap_or_default();
                 }
             }
         }
-    }
 
-    if let Some(path) = active_cad_path {
-        std::fs::remove_file(path).ok();
-    }
-    if let Some(path) = active_bom_path {
-        std::fs::remove_file(path).ok();
-    }
+        for (key, payload) in &matched_commit.modules {
+            let path = if let Some(link) = links.get(key) {
+                std::path::PathBuf::from(&link.path)
+            } else {
+                if key == "electronics" {
+                    project_dir.clone()
+                } else {
+                    continue;
+                }
+            };
 
-    // 5. Extraer los archivos del ZIP al directorio raíz del proyecto
-    let mut restored_files = Vec::new();
-    let cache_dir = project_dir.join(".ito").join("cache");
-    if cache_dir.exists() {
-        std::fs::remove_dir_all(&cache_dir).ok();
-    }
-    std::fs::create_dir_all(&cache_dir).ok();
+            let engine = registry.get_engine(&payload.engine_name)
+                .unwrap_or_else(|| registry.get_engine("file-hash").unwrap());
 
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)
-            .map_err(|e| format!("Error al acceder al archivo dentro del ZIP: {}", e))?;
-        let outpath = match file.enclosed_name() {
-            Some(path) => path.to_owned(),
-            None => continue,
+            let m_backup_dir = project_dir.join(".ito").join("backups").join(&matched_commit.hash).join(key);
+            engine.restore(&path, &m_backup_dir, payload)?;
+            restored_modules.push(key.clone());
+        }
+    } else {
+        // Fallback V1
+        let engine = registry.get_engine("semantic-cad").unwrap();
+        let m_backup_dir = project_dir.join(".ito").join("backups");
+        
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("zip_file".to_string(), format!("{}.zip", matched_commit.hash));
+        
+        let payload = engines::CommitPayload {
+            engine_name: "semantic-cad".to_string(),
+            changes_detected: true,
+            details: Vec::new(),
+            metadata,
         };
-
-        let file_name = outpath.file_name().unwrap().to_str().unwrap().to_string();
-        let target_dest_path = project_dir.join(&file_name);
-
-        let mut outfile = std::fs::File::create(&target_dest_path)
-            .map_err(|e| format!("Error al crear archivo de restauración: {}", e))?;
-        std::io::copy(&mut file, &mut outfile)
-            .map_err(|e| format!("Error al extraer archivo de restauración: {}", e))?;
-
-        // También copiar a la caché para mantener ito diff alineado
-        let cache_dest_path = cache_dir.join(&file_name);
-        std::fs::copy(&target_dest_path, &cache_dest_path).ok();
-
-        restored_files.push(file_name);
+        
+        engine.restore(&project_dir, &m_backup_dir, &payload)?;
+        restored_modules.push("electronics".to_string());
     }
 
-    Ok(restored_files)
+    Ok(restored_modules)
 }
 
 pub fn run_new(cwd: std::path::PathBuf, project_name: &str) -> Result<(std::path::PathBuf, String), String> {
@@ -740,10 +707,24 @@ pub fn run_link(project_root: std::path::PathBuf, module_key: &str, target_path:
     // Detectar herramienta
     let tool_detected = detect_tool_in_path(&target_path);
 
+    // Detectar motor por defecto según el módulo y herramientas presentes
+    let engine_detected = match module_key {
+        "firmware" => {
+            if target_path.join(".git").is_dir() {
+                "git".to_string()
+            } else {
+                "file-hash".to_string()
+            }
+        }
+        "electronics" => "semantic-cad".to_string(),
+        _ => "file-hash".to_string(),
+    };
+
     // Crear enlace
     let link = models::ItoProjectLink {
         path: target_path.to_string_lossy().to_string(),
         tool: tool_detected.clone(),
+        engine: engine_detected,
     };
 
     // Actualizar sección de links
@@ -1014,7 +995,7 @@ mod tests {
         // 4. Restaurar al primer commit
         let restored = run_restore(p_path.clone(), &commit1.hash[..8]).unwrap();
         assert_eq!(restored.len(), 1);
-        assert_eq!(restored[0], "design.json");
+        assert_eq!(restored[0], "electronics");
 
         // 5. Leer el archivo restaurado en disco y verificar que contiene R1 (no R2)
         let content = std::fs::read_to_string(&cad_path).unwrap();
@@ -1084,5 +1065,57 @@ mod tests {
         } else {
             std::env::remove_var("HOME");
         }
+    }
+
+    #[test]
+    fn test_modular_v2_flow() {
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-v2-flow-{}", unique_id));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // 1. Crear proyecto
+        let (p_path, _) = run_new(temp_dir.clone(), "V2Proj").unwrap();
+
+        // 2. Crear carpetas externas simuladas
+        let fw_src_dir = temp_dir.join("my-firmware");
+        let mech_src_dir = temp_dir.join("my-mechanics");
+        std::fs::create_dir_all(&fw_src_dir).unwrap();
+        std::fs::create_dir_all(&mech_src_dir).unwrap();
+
+        // Escribir archivos de inicio
+        std::fs::write(fw_src_dir.join("main.cpp"), "void setup() {}").unwrap();
+        std::fs::write(mech_src_dir.join("enclosure.step"), "STEP DATA V1").unwrap();
+
+        // 3. Vincular los módulos
+        run_link(p_path.clone(), "firmware", fw_src_dir.clone()).unwrap();
+        run_link(p_path.clone(), "mechanical", mech_src_dir.clone()).unwrap();
+
+        // 4. Primer commit modular
+        let commit1 = run_commit(p_path.clone(), Some("Modular init".to_string())).unwrap();
+        assert_eq!(commit1.message, "Modular init");
+        assert!(commit1.modules.contains_key("firmware"));
+        assert!(commit1.modules.contains_key("mechanical"));
+
+        // 5. Modificar archivos
+        std::fs::write(fw_src_dir.join("main.cpp"), "void setup() { /* Modificado */ }").unwrap();
+        std::fs::write(mech_src_dir.join("enclosure.step"), "STEP DATA V2").unwrap();
+
+        // Segundo commit modular
+        let commit2 = run_commit(p_path.clone(), Some("Modular update".to_string())).unwrap();
+        assert_eq!(commit2.message, "Modular update");
+
+        // 6. Restaurar al primer commit
+        let restored = run_restore(p_path.clone(), &commit1.hash[..8]).unwrap();
+        assert!(restored.contains(&"firmware".to_string()));
+        assert!(restored.contains(&"mechanical".to_string()));
+
+        // Verificar restauración de archivos
+        let fw_content = std::fs::read_to_string(fw_src_dir.join("main.cpp")).unwrap();
+        let mech_content = std::fs::read_to_string(mech_src_dir.join("enclosure.step")).unwrap();
+        assert_eq!(fw_content, "void setup() {}");
+        assert_eq!(mech_content, "STEP DATA V1");
+
+        // Limpiar
+        std::fs::remove_dir_all(&temp_dir).ok();
     }
 }

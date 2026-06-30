@@ -242,6 +242,8 @@ pub struct ItoProjectModules {
 pub struct ItoProjectLink {
     pub path: String,
     pub tool: String,
+    #[serde(default)]
+    pub engine: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
