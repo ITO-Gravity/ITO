@@ -76,6 +76,11 @@ enum Commands {
     Link,
     /// Muestra la lista consolidada de enlaces y módulos vinculados en el proyecto
     Links,
+    /// Copia al portapapeles la instrucción para navegar a un módulo vinculado (firmware, electronics, etc.)
+    Go {
+        /// Opcional: Nombre del módulo a navegar
+        module: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -113,6 +118,32 @@ async fn main() -> Result<()> {
         }
         Commands::Status => {
             let current_dir = std::env::current_dir()?;
+            
+            // 1. Resolver la raíz del proyecto (usando el resolvedor inteligente)
+            if let Some(root) = ito::find_project_root(&current_dir) {
+                // Leer ito.json de la raíz para obtener el nombre del proyecto
+                let ito_json_path = root.join("ito.json");
+                let mut project_name = "Proyecto Ito".to_string();
+                if ito_json_path.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&ito_json_path) {
+                        if let Ok(config) = serde_json::from_str::<models::ItoProjectConfig>(&content) {
+                            project_name = config.project_name;
+                        }
+                    }
+                }
+
+                // Comprobar si estamos parados dentro de un módulo vinculado de dicho proyecto
+                if let Some((_module_key, module_name)) = ito::find_linked_module_in_project(&root, &current_dir) {
+                    println!("\n{} | Módulo: {}", project_name.cyan().bold(), module_name.bold());
+                    println!("Ubicación: {}\n", current_dir.display().to_string().cyan());
+                } else {
+                    println!("\n{}", project_name.cyan().bold());
+                    println!("Ubicación: (Raíz del proyecto)\n");
+                }
+            } else {
+                println!("{}", "⚠ No se detectó ninguna relación con un proyecto de Ito activo.".yellow());
+            }
+
             println!("Analizando estado semántico del hardware...");
             
             let design = parsers::parse_project_directory(&current_dir)?;
@@ -957,7 +988,94 @@ async fn main() -> Result<()> {
                     println!("  {}", "❌ No vinculado".red());
                 }
             }
-            println!("");
+        }
+        Commands::Go { module } => {
+            use std::io::{self, Write};
+            use colored::Colorize;
+
+            let current_dir = std::env::current_dir()?;
+            let root = match ito::find_project_root(&current_dir) {
+                Some(r) => r,
+                None => {
+                    println!("{}", "❌ Error: No se encontró ningún proyecto de Ito asociado.".red().bold());
+                    std::process::exit(1);
+                }
+            };
+
+            let ito_json_path = root.join("ito.json");
+            if !ito_json_path.exists() {
+                println!("{}", "❌ Error: No se encontró el archivo ito.json en el proyecto.".red().bold());
+                std::process::exit(1);
+            }
+
+            let content = std::fs::read_to_string(&ito_json_path)?;
+            let config: ito::models::ItoProjectConfig = serde_json::from_str(&content)?;
+            let links_map = config.links.unwrap_or_default();
+
+            let modules = [
+                ("firmware", "Firmware"),
+                ("electronics", "Electrónica"),
+                ("mechanical", "Mecánica"),
+                ("documentation", "Documentación"),
+                ("manufacturing", "Manufactura"),
+            ];
+
+            let (target_key, target_name) = match module {
+                Some(ref m_arg) => {
+                    let m_lower = m_arg.to_lowercase();
+                    let matched = modules.iter().find(|(k, _)| *k == m_lower.as_str() || m_lower.starts_with(&k[..3]));
+                    match matched {
+                        Some((k, n)) => (k.to_string(), n.to_string()),
+                        None => {
+                            println!("{}", format!("❌ Error: Módulo '{}' no válido. Use uno de: firmware, electronics, mechanical, documentation, manufacturing.", m_arg).red());
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                None => {
+                    println!("{}", "Navegación de Módulos".bold());
+                    println!("¿A qué módulo desea ir?\n");
+                    for (idx, (key, name)) in modules.iter().enumerate() {
+                        if let Some(link) = links_map.get(*key) {
+                            println!("  [{}] {} ({})", (idx + 1).to_string().cyan().bold(), name.bold(), link.path.dimmed());
+                        } else {
+                            println!("  [{}] {} ({})", (idx + 1).to_string().dimmed(), name.dimmed(), "No vinculado".red());
+                        }
+                    }
+                    println!("");
+                    
+                    loop {
+                        print!("Seleccione una opción: ");
+                        io::stdout().flush().ok();
+                        let mut option = String::new();
+                        if io::stdin().read_line(&mut option).is_err() {
+                            println!("{}", "Error al leer la opción.".red());
+                            std::process::exit(1);
+                        }
+                        let option = option.trim();
+                        if let Ok(idx) = option.parse::<usize>() {
+                            if idx > 0 && idx <= modules.len() {
+                                let (k, n) = modules[idx - 1];
+                                break (k.to_string(), n.to_string());
+                            }
+                        }
+                        println!("{}", "Opción inválida. Intente de nuevo.".yellow());
+                    }
+                }
+            };
+
+            if let Some(link) = links_map.get(&target_key) {
+                let cd_command = format!("cd \"{}\"", link.path);
+                ito::copy_to_clipboard(&cd_command);
+                println!("\n✔ Módulo seleccionado: {}", target_name.cyan().bold());
+                println!("Ruta: {}", link.path.cyan());
+                println!("\n📋 El comando de navegación ha sido copiado al portapapeles.");
+                println!("Presiona {} / {} en tu terminal para ingresar al módulo.", "Ctrl+V".bold(), "Click Derecho".bold());
+                println!("\n💡 {} Una vez ingreses a la carpeta del módulo, puedes ver su estado con: {}", "Consejo:".bold(), "ito status".cyan());
+            } else {
+                println!("\n❌ El módulo {} no está vinculado todavía.", target_name.red().bold());
+                println!("💡 {} Vincúlalo primero con: {}", "Consejo:".bold(), format!("ito link").cyan());
+            }
         }
     }
 

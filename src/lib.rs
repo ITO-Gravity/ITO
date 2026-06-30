@@ -598,6 +598,7 @@ pub fn copy_to_clipboard(text: &str) {
 }
 
 pub fn find_project_root(start_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    // 1. Intentar el método habitual de subir por los directorios padres
     let mut current = start_dir.to_path_buf();
     loop {
         if current.join("ito.json").is_file() || current.join(".ito").join("config.toml").is_file() {
@@ -605,6 +606,63 @@ pub fn find_project_root(start_dir: &std::path::Path) -> Option<std::path::PathB
         }
         if !current.pop() {
             break;
+        }
+    }
+
+    // 2. Si no se encuentra, buscar en los proyectos del Workspace de ITO
+    if let Ok(Some(ws_config)) = load_workspace_config() {
+        let ws_path = std::path::PathBuf::from(&ws_config.workspace);
+        let projects_dir = ws_path.join("Projects");
+        let projects = scan_directory_for_projects(&projects_dir);
+        
+        let start_str = start_dir.to_string_lossy().to_lowercase().replace('\\', "/");
+        
+        for project in projects {
+            let ito_json_path = project.path.join("ito.json");
+            if ito_json_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&ito_json_path) {
+                    if let Ok(config) = serde_json::from_str::<models::ItoProjectConfig>(&content) {
+                        if let Some(links) = config.links {
+                            for link in links.values() {
+                                let link_str = std::path::PathBuf::from(&link.path).to_string_lossy().to_lowercase().replace('\\', "/");
+                                if start_str == link_str || start_str.starts_with(&format!("{}/", link_str)) {
+                                    return Some(project.path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+pub fn find_linked_module_in_project(project_root: &std::path::Path, current_dir: &std::path::Path) -> Option<(String, String)> {
+    let ito_json_path = project_root.join("ito.json");
+    if ito_json_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&ito_json_path) {
+            if let Ok(config) = serde_json::from_str::<models::ItoProjectConfig>(&content) {
+                if let Some(links) = config.links {
+                    let modules = [
+                        ("firmware", "Firmware"),
+                        ("electronics", "Electrónica"),
+                        ("mechanical", "Mecánica"),
+                        ("documentation", "Documentación"),
+                        ("manufacturing", "Manufactura"),
+                    ];
+                    let current_str = current_dir.to_string_lossy().to_lowercase().replace('\\', "/");
+                    for (key, name) in &modules {
+                        if let Some(link) = links.get(*key) {
+                            let link_str = std::path::PathBuf::from(&link.path).to_string_lossy().to_lowercase().replace('\\', "/");
+                            if current_str == link_str || current_str.starts_with(&format!("{}/", link_str)) {
+                                return Some((key.to_string(), name.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     None
@@ -705,6 +763,7 @@ pub fn run_link(project_root: std::path::PathBuf, module_key: &str, target_path:
 #[cfg(test)]
 mod tests {
     use super::*;
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_run_new_creation() {
@@ -738,6 +797,7 @@ mod tests {
 
     #[test]
     fn test_workspace_config_flow() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         let unique_id = uuid::Uuid::new_v4().to_string();
         let temp_home = std::env::temp_dir().join(format!("ito-home-{}", unique_id));
         let temp_ws = temp_home.join("Documents").join("ITO");
@@ -963,5 +1023,66 @@ mod tests {
 
         // Limpiar
         std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_intelligent_project_root_resolver() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-vcs-intel-{}", unique_id));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Simular variables de entorno para que apunten al directorio temporal
+        let original_userprofile = std::env::var("USERPROFILE").ok();
+        let original_home = std::env::var("HOME").ok();
+
+        std::env::set_var("USERPROFILE", &temp_dir);
+        std::env::set_var("HOME", &temp_dir);
+
+        // Crear la carpeta del Workspace simulado
+        let ws_path = temp_dir.join("Documents").join("ITO");
+        std::fs::create_dir_all(&ws_path).unwrap();
+        save_workspace_config(&ws_path).unwrap();
+
+        // 1. Crear proyecto del Workspace
+        let projects_dir = ws_path.join("Projects");
+        let (p_path, _) = run_new(projects_dir, "MyIntelProj").unwrap();
+
+        // 2. Crear una carpeta externa simulada de diseño
+        let external_cad_dir = temp_dir.join("MyExternalCAD");
+        std::fs::create_dir_all(&external_cad_dir).unwrap();
+
+        // Vincular el módulo a la carpeta externa
+        let _ = run_link(p_path.clone(), "electronics", external_cad_dir.clone()).unwrap();
+
+        let resolved_root = find_project_root(&external_cad_dir);
+        assert!(resolved_root.is_some());
+        let r_root = resolved_root.unwrap();
+        assert_eq!(
+            r_root.to_string_lossy().to_lowercase().replace('\\', "/"),
+            p_path.to_string_lossy().to_lowercase().replace('\\', "/")
+        );
+
+        // 4. Probar que find_linked_module_in_project funciona
+        let linked_module = find_linked_module_in_project(&p_path, &external_cad_dir);
+        assert!(linked_module.is_some());
+        let (key, name) = linked_module.unwrap();
+        assert_eq!(key, "electronics");
+        assert_eq!(name, "Electrónica");
+
+        // Limpiar
+        std::fs::remove_dir_all(&temp_dir).ok();
+
+        // Restaurar variables de entorno
+        if let Some(val) = original_userprofile {
+            std::env::set_var("USERPROFILE", val);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
+        if let Some(val) = original_home {
+            std::env::set_var("HOME", val);
+        } else {
+            std::env::remove_var("HOME");
+        }
     }
 }
