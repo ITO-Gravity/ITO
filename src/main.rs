@@ -1,6 +1,7 @@
 use ito::{models, parsers, diff, linter, Config};
 use clap::{Parser, Subcommand};
 use anyhow::Result;
+use colored::Colorize;
 
 #[derive(Parser)]
 #[command(name = "ito")]
@@ -36,15 +37,22 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Sincroniza y respalda los archivos locales con la nube de Alexandria-HQ
-    Push {
+    /// Guarda un nuevo respaldo de diseño local analizando los cambios semánticos
+    Commit {
         /// Mensaje descriptivo para el commit/respaldo
         #[arg(short, long)]
         message: Option<String>,
 
-        /// Forzar el push omitiendo errores críticos del linter
+        /// Forzar el commit omitiendo errores críticos del linter
         #[arg(long)]
         force: bool,
+    },
+    /// Muestra el historial completo de revisiones locales de hardware
+    Log,
+    /// Restaura una versión anterior del diseño de hardware en tu directorio de trabajo
+    Restore {
+        /// El hash (o prefijo del hash corto) de la versión a restaurar
+        hash: String,
     },
     /// Ejecuta reglas de diseño eléctrico semántico (ERC)
     Lint {
@@ -113,6 +121,8 @@ async fn main() -> Result<()> {
 
             println!("  CAD/Esquema: {} componentes cargados.", cad_comp_count);
             println!("  Nets: {} conexiones eléctricas encontradas.", net_count);
+            println!("\n💡 {} Si realizaste modificaciones, puedes comparar los cambios semánticos con: {}", "Consejo:".bold(), "ito diff".cyan());
+            println!("💡 {} Si estás listo para guardar esta versión localmente, ejecuta: {}", "Consejo:".bold(), "ito commit -m \"Mensaje\"".cyan());
         }
         Commands::Diff { path, json } => {
             let current_dir = std::env::current_dir()?;
@@ -366,11 +376,12 @@ async fn main() -> Result<()> {
             }
 
             println!("");
+            println!("💡 {} Si estás de acuerdo con estos cambios, puedes guardarlos localmente con: {}", "Consejo:".bold(), "ito commit -m \"Mensaje\"".cyan());
         }
-        Commands::Push { message, force } => {
+        Commands::Commit { message, force } => {
             let current_dir = std::env::current_dir()?;
             
-            // Ejecutar linter antes de subir
+            // Ejecutar linter antes de hacer commit
             if let Ok(design) = parsers::parse_project_directory(&current_dir) {
                 let issues = linter::run_lint(&design);
                 let critical_count = issues.iter().filter(|i| i.severity == linter::LintSeverity::Critical).count();
@@ -383,23 +394,181 @@ async fn main() -> Result<()> {
                             println!("    {}", issue.details.dimmed());
                         }
                     }
-                    println!("\n{}", "Push cancelado. Corrige los errores o usa '--force' para ignorarlos y continuar.".yellow().bold());
-                    anyhow::bail!("Push abortado debido a errores ERC del linter.");
+                    println!("\n{}", "Commit cancelado. Corrige los errores o usa '--force' para ignorarlos y continuar.".yellow().bold());
+                    anyhow::bail!("Commit abortado debido a errores ERC del linter.");
                 }
             }
 
-            match ito::run_push(current_dir, message.clone()).await {
-                Ok((_, info_msg)) => {
+            match ito::run_commit(current_dir, message.clone()) {
+                Ok(commit) => {
                     use colored::Colorize;
-                    println!("{}", info_msg.green().bold());
+                    println!("{}", "✔ Respaldo de diseño guardado localmente con éxito.".green().bold());
+                    println!("Hash:    {}", commit.hash.cyan());
+                    println!("Mensaje: {}", commit.message.bold());
+                    println!("Fecha:   {}", commit.timestamp.dimmed());
+
+                    if let Some(ref summary) = commit.diff_summary {
+                        println!("\nResumen de cambios:");
+                        println!(
+                            "  Componentes: {} añadidos, {} eliminados, {} modificados",
+                            summary.added_components.to_string().green(),
+                            summary.deleted_components.to_string().red(),
+                            summary.modified_components.to_string().yellow()
+                        );
+                        println!(
+                            "  Conexiones:  {} añadidas, {} eliminadas, {} modificadas",
+                            summary.added_nets.to_string().green(),
+                            summary.deleted_nets.to_string().red(),
+                            summary.modified_nets.to_string().yellow()
+                        );
+                    }
+                    println!("\n💡 {} Puedes ver el historial de versiones con: {}", "Consejo:".bold(), "ito log".cyan());
                 }
                 Err(err_msg) => {
                     if err_msg.contains("No hay cambios pendientes") {
                         use colored::Colorize;
-                        println!("{}", err_msg.green().bold());
+                        println!("{}", err_msg.yellow());
                     } else {
                         anyhow::bail!("{}", err_msg);
                     }
+                }
+            }
+        }
+        Commands::Log => {
+            use colored::Colorize;
+
+            let current_dir = std::env::current_dir()?;
+            let root = match ito::find_project_root(&current_dir) {
+                Some(r) => r,
+                None => {
+                    println!("{}", "❌ Error: No se encontró la raíz del proyecto. ¿Ejecutaste 'ito init' o 'ito new' primero?".red().bold());
+                    std::process::exit(1);
+                }
+            };
+
+            let history_path = root.join(".ito").join("history.toml");
+            if !history_path.exists() {
+                println!("{}", "No hay ningún commit registrado en este repositorio todavía.".yellow());
+                println!("\n💡 {} Comienza guardando una versión con: {}", "Consejo:".bold(), "ito commit -m \"Mensaje\"".cyan());
+                return Ok(());
+            }
+
+            let content = std::fs::read_to_string(&history_path)?;
+            let history: ito::History = toml::from_str(&content).unwrap_or_default();
+
+            if history.commits.is_empty() {
+                println!("{}", "No hay ningún commit registrado en este repositorio todavía.".yellow());
+                println!("\n💡 {} Comienza guardando una versión con: {}", "Consejo:".bold(), "ito commit -m \"Mensaje\"".cyan());
+                return Ok(());
+            }
+
+            println!("\n{}", "Historial de Revisiones de Hardware".bold());
+            println!("------------------------------------------------------------");
+
+            // Mostrar el último commit primero
+            for commit in history.commits.iter().rev() {
+                let short_hash = if commit.hash.len() > 8 {
+                    &commit.hash[..8]
+                } else {
+                    &commit.hash
+                };
+
+                println!("Commit:  {}", short_hash.cyan().bold());
+                println!("Fecha:   {}", commit.timestamp.dimmed());
+                println!("Mensaje: {}", commit.message.bold());
+
+                if let Some(ref summary) = commit.diff_summary {
+                    let total_changes = summary.added_components
+                        + summary.deleted_components
+                        + summary.modified_components
+                        + summary.added_nets
+                        + summary.deleted_nets
+                        + summary.modified_nets;
+
+                    if total_changes > 0 {
+                        print!("Cambios: ");
+                        let mut parts = Vec::new();
+                        if summary.added_components > 0 {
+                            parts.push(format!("+{} comp", summary.added_components).green().to_string());
+                        }
+                        if summary.deleted_components > 0 {
+                            parts.push(format!("-{} comp", summary.deleted_components).red().to_string());
+                        }
+                        if summary.modified_components > 0 {
+                            parts.push(format!("~{} comp", summary.modified_components).yellow().to_string());
+                        }
+                        if summary.added_nets > 0 {
+                            parts.push(format!("+{} nets", summary.added_nets).green().to_string());
+                        }
+                        if summary.deleted_nets > 0 {
+                            parts.push(format!("-{} nets", summary.deleted_nets).red().to_string());
+                        }
+                        if summary.modified_nets > 0 {
+                            parts.push(format!("~{} nets", summary.modified_nets).yellow().to_string());
+                        }
+                        println!("{}", parts.join(", "));
+                    } else {
+                        println!("Cambios: {}", "Sin cambios en componentes ni conexiones.".dimmed());
+                    }
+                }
+                println!("------------------------------------------------------------");
+            }
+
+            println!("\n💡 {} Si deseas restaurar tu diseño a una versión anterior, ejecuta: {}", "Consejo:".bold(), "ito restore <hash_corto>".cyan());
+        }
+        Commands::Restore { hash } => {
+            use std::io::{self, Write};
+            use colored::Colorize;
+
+            let current_dir = std::env::current_dir()?;
+            let root = match ito::find_project_root(&current_dir) {
+                Some(r) => r,
+                None => {
+                    println!("{}", "❌ Error: No se encontró la raíz del proyecto. ¿Ejecutaste 'ito init' o 'ito new' primero?".red().bold());
+                    std::process::exit(1);
+                }
+            };
+
+            // Verificar si hay cambios sin guardar comparando la caché con la carpeta de trabajo
+            let cache_dir = root.join(".ito").join("cache");
+            let old_design = if cache_dir.exists() {
+                parsers::parse_project_directory(&cache_dir).unwrap_or_else(|_| models::HardwareDesign::new())
+            } else {
+                models::HardwareDesign::new()
+            };
+            let new_design = parsers::parse_project_directory(&root).unwrap_or_else(|_| models::HardwareDesign::new());
+            let diff_result = diff::diff_designs(&old_design, &new_design);
+
+            if !diff_result.is_empty() {
+                println!("{}", "⚠ Advertencia: Tienes cambios no guardados en tu diseño de hardware actual.".yellow().bold());
+                println!("Si restauras otra versión, perderás de forma permanente los cambios actuales.");
+                print!("¿Deseas continuar de todas formas? [s/N]: ");
+                io::stdout().flush().ok();
+
+                let mut answer = String::new();
+                if io::stdin().read_line(&mut answer).is_err() {
+                    println!("{}", "Cancelado.".red());
+                    std::process::exit(1);
+                }
+                let answer = answer.trim().to_lowercase();
+                if answer != "s" && answer != "si" {
+                    println!("{}", "Restauración cancelada.".yellow());
+                    return Ok(());
+                }
+            }
+
+            match ito::run_restore(root, hash) {
+                Ok(restored_files) => {
+                    println!("\n{}", "✔ Diseño de hardware restaurado correctamente con éxito.".green().bold());
+                    println!("Archivos recuperados:");
+                    for file in restored_files {
+                        println!("  - {}", file.cyan());
+                    }
+                    println!("\n💡 {} Puedes verificar el estado de tu diseño con: {}", "Consejo:".bold(), "ito status".cyan());
+                }
+                Err(err) => {
+                    println!("{}", format!("❌ Error: {}", err).red().bold());
+                    std::process::exit(1);
                 }
             }
         }
@@ -517,6 +686,7 @@ async fn main() -> Result<()> {
                     println!("UUID: {}", uuid.cyan());
                     println!("Ubicación: {}\n", path.display().to_string().cyan());
                     println!("{}", "ITO está listo para comenzar el versionado.".green().bold());
+                    println!("\n💡 {} Ingresa a la carpeta del proyecto y vincula tus módulos con: {}", "Consejo:".bold(), "ito link".cyan());
                 }
                 Err(err) => {
                     use colored::Colorize;
@@ -720,6 +890,8 @@ async fn main() -> Result<()> {
                         println!("\n✔ Proyecto {} detectado.", tool.green().bold());
                     }
                     println!("✔ Módulo {} vinculado correctamente a: {}\n", module_name.green().bold(), target_path.display().to_string().cyan());
+                    println!("💡 {} Puedes auditar tus enlaces en cualquier momento con: {}", "Consejo:".bold(), "ito links".cyan());
+                    println!("💡 {} Si ya vinculaste tus módulos principales, verifica el estado de tu diseño con: {}", "Consejo:".bold(), "ito status".cyan());
                 }
                 Err(err) => {
                     println!("{}", format!("❌ Error: {}", err).red().bold());

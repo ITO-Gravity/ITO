@@ -13,6 +13,16 @@ pub struct Config {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct DiffSummary {
+    pub added_components: usize,
+    pub deleted_components: usize,
+    pub modified_components: usize,
+    pub added_nets: usize,
+    pub deleted_nets: usize,
+    pub modified_nets: usize,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct CommitEntry {
     pub hash: String,
     pub parent_hash: String,
@@ -20,6 +30,8 @@ pub struct CommitEntry {
     pub timestamp: String,
     pub zip_path: String,
     pub synced: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_summary: Option<DiffSummary>,
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize, Clone)]
@@ -27,19 +39,13 @@ pub struct History {
     pub commits: Vec<CommitEntry>,
 }
 
-pub async fn run_push(project_dir: std::path::PathBuf, message: Option<String>) -> Result<(CommitEntry, String), String> {
-    let config_path = project_dir.join(".ito").join("config.toml");
-    if !config_path.exists() {
-        return Err("No se encontró la configuración de Ito. ¿Corriste 'ito init' primero?".to_string());
+pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> Result<CommitEntry, String> {
+    let ito_dir = project_dir.join(".ito");
+    if !ito_dir.exists() {
+        return Err("No se encontró la carpeta oculta .ito. ¿Inicializaste el proyecto con 'ito new' o 'ito init'?".to_string());
     }
 
-    // 1. Leer configuración TOML
-    let config_str = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("Error al leer configuración: {}", e))?;
-    let config: Config = toml::from_str(&config_str)
-        .map_err(|e| format!("Error al parsear configuración: {}", e))?;
-
-    // 2. Localizar archivos originales de hardware en la carpeta del proyecto
+    // 1. Localizar archivos originales de hardware en la carpeta del proyecto
     let mut cad_file_path = None;
     let mut bom_file_path = None;
     
@@ -82,7 +88,7 @@ pub async fn run_push(project_dir: std::path::PathBuf, message: Option<String>) 
         None
     };
 
-    // 3. Calcular hash SHA-256 de los archivos originales
+    // 2. Calcular hash SHA-256 de los archivos originales
     let mut hasher = Sha256::new();
     hasher.update(&cad_bytes);
     if let Some(ref b_bytes) = bom_bytes {
@@ -92,7 +98,7 @@ pub async fn run_push(project_dir: std::path::PathBuf, message: Option<String>) 
     let hash_result = hasher.finalize();
     let hash_str = format!("{:x}", hash_result);
 
-    // 4. Cargar historial local
+    // 3. Cargar historial local
     let history_path = project_dir.join(".ito").join("history.toml");
     let mut history = if history_path.exists() {
         let content = std::fs::read_to_string(&history_path)
@@ -112,6 +118,27 @@ pub async fn run_push(project_dir: std::path::PathBuf, message: Option<String>) 
     if hash_str == parent_hash {
         return Err("No hay cambios pendientes de hardware para respaldar ni sincronizar.".to_string());
     }
+
+    // 4. Calcular diferencia semántica (diff) comparando con la caché actual (que representa el parent_hash)
+    let cache_dir = project_dir.join(".ito").join("cache");
+    let old_design = if cache_dir.exists() {
+        parsers::parse_project_directory(&cache_dir).unwrap_or_else(|_| models::HardwareDesign::new())
+    } else {
+        models::HardwareDesign::new()
+    };
+
+    let new_design = parsers::parse_project_directory(&project_dir)
+        .unwrap_or_else(|_| models::HardwareDesign::new());
+
+    let diff_result = diff::diff_designs(&old_design, &new_design);
+    let diff_summary = DiffSummary {
+        added_components: diff_result.components.added.len(),
+        deleted_components: diff_result.components.deleted.len(),
+        modified_components: diff_result.components.modified.len(),
+        added_nets: diff_result.nets.added.len(),
+        deleted_nets: diff_result.nets.deleted.len(),
+        modified_nets: diff_result.nets.modified.len(),
+    };
 
     // 5. Crear la carpeta de respaldos y el ZIP
     let backups_dir = project_dir.join(".ito").join("backups");
@@ -143,73 +170,26 @@ pub async fn run_push(project_dir: std::path::PathBuf, message: Option<String>) 
 
     // 6. Registrar en el historial local
     let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let commit_msg = message.clone().unwrap_or_else(|| "Sincronización de hardware".to_string());
+    let commit_msg = message.clone().unwrap_or_else(|| "Respaldo local de hardware".to_string());
     let relative_zip_path = format!(".ito/backups/{}.zip", hash_str);
 
-    let mut commit_entry = CommitEntry {
+    let commit_entry = CommitEntry {
         hash: hash_str.clone(),
         parent_hash: parent_hash.clone(),
         message: commit_msg.clone(),
         timestamp,
         zip_path: relative_zip_path,
-        synced: false,
+        synced: true,
+        diff_summary: Some(diff_summary),
     };
 
-    // 7. Intentar la sincronización con Alexandria-HQ
-    let mut form = reqwest::multipart::Form::new()
-        .text("project_id", config.project_id.clone())
-        .text("domain", "hardware")
-        .text("version_hash", hash_str.clone())
-        .text("parent_hash", parent_hash.clone())
-        .text("message", commit_msg.clone());
-
-    let design_part = reqwest::multipart::Part::bytes(cad_bytes.clone())
-        .file_name(cad_filename.clone())
-        .mime_str(get_mime_type_from_filename(&cad_filename))
-        .map_err(|e| format!("Error al crear parte design_file: {}", e))?;
-    form = form.part("design_json", design_part);
-
-    if let (Some(ref b_filename), Some(ref b_bytes)) = (&bom_filename, &bom_bytes) {
-        let bom_part = reqwest::multipart::Part::bytes((*b_bytes).clone())
-            .file_name(b_filename.clone())
-            .mime_str(get_mime_type_from_filename(b_filename))
-            .map_err(|e| format!("Error al crear parte bom_file: {}", e))?;
-        form = form.part("bom_csv", bom_part);
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("Error al construir cliente HTTP: {}", e))?;
-    
-    let send_res = client
-        .post(&config.remote_url)
-        .multipart(form)
-        .send()
-        .await;
-
-    let (sync_success, info_msg) = match send_res {
-        Ok(response) => {
-            if response.status().is_success() {
-                (true, format!("¡Archivos del proyecto sincronizados con éxito en Alexandria-HQ! [Proyecto: {}]", config.project_id))
-            } else {
-                (false, format!("Backup local generado con éxito en .ito/backups/. Sincronización fallida (HTTP {}).", response.status()))
-            }
-        }
-        Err(_) => {
-            (false, "Backup local generado con éxito en .ito/backups/. Sincronización con Alexandria-HQ pendiente (Servidor no disponible)".to_string())
-        }
-    };
-
-    commit_entry.synced = sync_success;
     history.commits.push(commit_entry.clone());
     let history_str = toml::to_string_pretty(&history)
         .map_err(|e| format!("Error al serializar historial: {}", e))?;
     std::fs::write(&history_path, history_str)
         .map_err(|e| format!("Error al escribir historial: {}", e))?;
 
-    // 8. Actualizar la caché local para 'ito diff'
-    let cache_dir = project_dir.join(".ito").join("cache");
+    // 7. Actualizar la caché local para 'ito diff'
     if cache_dir.exists() {
         std::fs::remove_dir_all(&cache_dir).ok();
     }
@@ -220,19 +200,94 @@ pub async fn run_push(project_dir: std::path::PathBuf, message: Option<String>) 
         std::fs::write(cache_dir.join(b_filename), b_bytes).ok();
     }
 
-    Ok((commit_entry, info_msg))
+    Ok(commit_entry)
 }
 
-fn get_mime_type_from_filename(filename: &str) -> &'static str {
-    let ext = filename.split('.').last().unwrap_or("").to_lowercase();
-    match ext.as_str() {
-        "json" => "application/json",
-        "csv" => "text/csv",
-        "edif" | "edf" => "text/plain",
-        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "xls" => "application/vnd.ms-excel",
-        _ => "application/octet-stream",
+pub fn run_restore(project_dir: std::path::PathBuf, target_hash: &str) -> Result<Vec<String>, String> {
+    let history_path = project_dir.join(".ito").join("history.toml");
+    if !history_path.exists() {
+        return Err("No se encontró el historial del proyecto. ¿Ejecutaste 'ito commit' primero?".to_string());
     }
+
+    // 1. Cargar historial
+    let content = std::fs::read_to_string(&history_path)
+        .map_err(|e| format!("Error al leer historial: {}", e))?;
+    let history: History = toml::from_str(&content)
+        .map_err(|e| format!("Error al parsear historial: {}", e))?;
+
+    // 2. Buscar el commit por prefijo
+    let matched_commit = history.commits.iter().find(|c| c.hash.starts_with(target_hash))
+        .ok_or_else(|| format!("No se encontró ninguna versión con el prefijo de hash '{}'.", target_hash))?;
+
+    // 3. Abrir el archivo zip
+    let absolute_zip_path = project_dir.join(&matched_commit.zip_path);
+    if !absolute_zip_path.exists() {
+        return Err(format!("No se encontró el archivo de respaldo en la ruta: {}", absolute_zip_path.display()));
+    }
+
+    let file = std::fs::File::open(&absolute_zip_path)
+        .map_err(|e| format!("Error al abrir archivo de respaldo ZIP: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("Error al leer el archivo ZIP: {}", e))?;
+
+    // 4. Limpiar los archivos CAD/BOM activos antes de extraer los nuevos
+    let mut active_cad_path = None;
+    let mut active_bom_path = None;
+    if let Ok(entries) = std::fs::read_dir(&project_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                    let ext_lower = ext.to_lowercase();
+                    if ext_lower == "kicad_pcb" || ext_lower == "kicad_sch" || ext_lower == "brd" || ext_lower == "edif" || ext_lower == "edf" || (ext_lower == "sch" && !path.to_string_lossy().contains("bom")) {
+                        active_cad_path = Some(path);
+                    } else if ext_lower == "xlsx" || ext_lower == "xls" || (ext_lower == "csv" && path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase().contains("bom")) {
+                        active_bom_path = Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(path) = active_cad_path {
+        std::fs::remove_file(path).ok();
+    }
+    if let Some(path) = active_bom_path {
+        std::fs::remove_file(path).ok();
+    }
+
+    // 5. Extraer los archivos del ZIP al directorio raíz del proyecto
+    let mut restored_files = Vec::new();
+    let cache_dir = project_dir.join(".ito").join("cache");
+    if cache_dir.exists() {
+        std::fs::remove_dir_all(&cache_dir).ok();
+    }
+    std::fs::create_dir_all(&cache_dir).ok();
+
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)
+            .map_err(|e| format!("Error al acceder al archivo dentro del ZIP: {}", e))?;
+        let outpath = match file.enclosed_name() {
+            Some(path) => path.to_owned(),
+            None => continue,
+        };
+
+        let file_name = outpath.file_name().unwrap().to_str().unwrap().to_string();
+        let target_dest_path = project_dir.join(&file_name);
+
+        let mut outfile = std::fs::File::create(&target_dest_path)
+            .map_err(|e| format!("Error al crear archivo de restauración: {}", e))?;
+        std::io::copy(&mut file, &mut outfile)
+            .map_err(|e| format!("Error al extraer archivo de restauración: {}", e))?;
+
+        // También copiar a la caché para mantener ito diff alineado
+        let cache_dest_path = cache_dir.join(&file_name);
+        std::fs::copy(&target_dest_path, &cache_dest_path).ok();
+
+        restored_files.push(file_name);
+    }
+
+    Ok(restored_files)
 }
 
 pub fn run_new(cwd: std::path::PathBuf, project_name: &str) -> Result<(std::path::PathBuf, String), String> {
@@ -840,6 +895,71 @@ mod tests {
         let link = links.get("firmware").unwrap();
         assert_eq!(link.path, fw_path.to_string_lossy().to_string());
         assert_eq!(link.tool, "PlatformIO");
+
+        // Limpiar
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_run_commit_local_vcs() {
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-vcs-commit-{}", unique_id));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // 1. Crear proyecto
+        let (p_path, _) = run_new(temp_dir.clone(), "VcsProj").unwrap();
+
+        // 2. Crear archivo de diseño en la raíz del proyecto para que run_commit lo procese
+        let cad_path = p_path.join("design.json");
+        std::fs::write(&cad_path, r#"{"components":[], "nets":[]}"#).unwrap();
+
+        // 3. Ejecutar commit
+        let commit = run_commit(p_path.clone(), Some("Primer commit".to_string())).unwrap();
+        assert_eq!(commit.message, "Primer commit");
+        assert!(commit.diff_summary.is_some());
+        
+        let summary = commit.diff_summary.unwrap();
+        assert_eq!(summary.added_components, 0);
+
+        // 4. Modificar diseño para el segundo commit (Añadir R1)
+        std::fs::write(&cad_path, r#"{"components":[{"designator":"R1","footprint":"","pins":[]}], "nets":[]}"#).unwrap();
+        
+        let commit2 = run_commit(p_path.clone(), Some("Segundo commit".to_string())).unwrap();
+        assert_eq!(commit2.message, "Segundo commit");
+        let summary2 = commit2.diff_summary.unwrap();
+        assert_eq!(summary2.added_components, 1); // Detecta que se añadió R1!
+
+        // Limpiar
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_run_restore_local_vcs() {
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-vcs-restore-{}", unique_id));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // 1. Crear proyecto
+        let (p_path, _) = run_new(temp_dir.clone(), "RestoreProj").unwrap();
+
+        // 2. Crear primer diseño (R1) y hacer commit
+        let cad_path = p_path.join("design.json");
+        std::fs::write(&cad_path, r#"{"components":[{"designator":"R1","footprint":"","pins":[]}], "nets":[]}"#).unwrap();
+        let commit1 = run_commit(p_path.clone(), Some("Commit 1".to_string())).unwrap();
+
+        // 3. Modificar diseño a (R2) y hacer commit
+        std::fs::write(&cad_path, r#"{"components":[{"designator":"R2","footprint":"","pins":[]}], "nets":[]}"#).unwrap();
+        let _commit2 = run_commit(p_path.clone(), Some("Commit 2".to_string())).unwrap();
+
+        // 4. Restaurar al primer commit
+        let restored = run_restore(p_path.clone(), &commit1.hash[..8]).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0], "design.json");
+
+        // 5. Leer el archivo restaurado en disco y verificar que contiene R1 (no R2)
+        let content = std::fs::read_to_string(&cad_path).unwrap();
+        assert!(content.contains("R1"));
+        assert!(!content.contains("R2"));
 
         // Limpiar
         std::fs::remove_dir_all(&temp_dir).ok();
