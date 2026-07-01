@@ -743,6 +743,57 @@ pub fn run_link(project_root: std::path::PathBuf, module_key: &str, target_path:
     Ok(tool_detected)
 }
 
+pub fn write_goto_script(cd_command: &str) {
+    if let Some(temp_dir) = std::env::var_os("TEMP") {
+        let temp_path_ps1 = std::path::Path::new(&temp_dir).join("ito_goto.ps1");
+        let _ = std::fs::write(&temp_path_ps1, cd_command);
+        
+        let temp_path_bat = std::path::Path::new(&temp_dir).join("ito_goto.bat");
+        let _ = std::fs::write(&temp_path_bat, cd_command);
+    }
+}
+
+pub fn install_shell_wrappers() -> std::result::Result<(), String> {
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(bin_dir) = current_exe.parent() {
+            let cmd_path = bin_dir.join("ito.cmd");
+            let cmd_content = "@echo off\r\nito.exe %*\r\nif exist \"%TEMP%\\ito_goto.bat\" (\r\n    call \"%TEMP%\\ito_goto.bat\"\r\n    del \"%TEMP%\\ito_goto.bat\"\r\n)\r\n";
+            let _ = std::fs::write(&cmd_path, cmd_content);
+        }
+    }
+
+    if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+        let user_profile_path = std::path::Path::new(&user_profile);
+        
+        let profile_dirs = [
+            user_profile_path.join("Documents").join("WindowsPowerShell"),
+            user_profile_path.join("OneDrive").join("Documents").join("WindowsPowerShell"),
+            user_profile_path.join("Documents").join("PowerShell"),
+            user_profile_path.join("OneDrive").join("Documents").join("PowerShell"),
+        ];
+
+        let wrapper_code = "\r\nfunction ito {\r\n    & ito.exe $args\r\n    if (Test-Path \"$env:TEMP\\ito_goto.ps1\") {\r\n        . \"$env:TEMP\\ito_goto.ps1\"\r\n        Remove-Item \"$env:TEMP\\ito_goto.ps1\"\r\n    }\r\n}\r\n";
+
+        for dir in &profile_dirs {
+            let profile_file = dir.join("Microsoft.PowerShell_profile.ps1");
+            if dir.exists() || std::fs::create_dir_all(dir).is_ok() {
+                let mut content = if profile_file.exists() {
+                    std::fs::read_to_string(&profile_file).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                if !content.contains("function ito {") {
+                    content.push_str(wrapper_code);
+                    let _ = std::fs::write(&profile_file, content);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

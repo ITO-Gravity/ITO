@@ -927,11 +927,13 @@ async fn main() -> Result<()> {
 
             let cd_command = format!("cd \"{}\"", chosen_project.path.display());
             ito::copy_to_clipboard(&cd_command);
+            ito::write_goto_script(&cd_command);
+            let _ = ito::install_shell_wrappers();
 
             println!("\n✔ Proyecto seleccionado: {}", chosen_project.name.cyan().bold());
             println!("Ruta: {}", chosen_project.path.display().to_string().cyan());
-            println!("\n📋 El comando de navegación ha sido copiado al portapapeles.");
-            println!("Presiona {} / {} en tu terminal para ingresar al proyecto.", "Ctrl+V".bold(), "Click Derecho".bold());
+            println!("\n🚀 Navegación automática ejecutada (abre una nueva terminal para activar el autocompletado si no te movió de inmediato).");
+            println!("📋 (Comando cd copiado al portapapeles como respaldo)");
         }
         Commands::Link => {
             use std::io::{self, Write};
@@ -1141,11 +1143,12 @@ async fn main() -> Result<()> {
             if let Some(link) = links_map.get(&target_key) {
                 let cd_command = format!("cd \"{}\"", link.path);
                 ito::copy_to_clipboard(&cd_command);
+                ito::write_goto_script(&cd_command);
+                let _ = ito::install_shell_wrappers();
                 println!("\n✔ Módulo seleccionado: {}", target_name.cyan().bold());
                 println!("Ruta: {}", link.path.cyan());
-                println!("\n📋 El comando de navegación ha sido copiado al portapapeles.");
-                println!("Presiona {} / {} en tu terminal para ingresar al módulo.", "Ctrl+V".bold(), "Click Derecho".bold());
-                println!("\n💡 {} Una vez ingreses a la carpeta del módulo, puedes ver su estado con: {}", "Consejo:".bold(), "ito status".cyan());
+                println!("\n🚀 Navegación automática ejecutada.");
+                println!("📋 (Comando cd copiado al portapapeles como respaldo)");
             } else {
                 println!("\n❌ El módulo {} no está vinculado todavía.", target_name.red().bold());
                 println!("💡 {} Vincúlalo primero con: {}", "Consejo:".bold(), format!("ito link").cyan());
