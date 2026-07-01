@@ -753,6 +753,30 @@ pub fn write_goto_script(cd_command: &str) {
     }
 }
 
+pub fn open_folder_dialog(description: &str) -> Option<String> {
+    let ps_command = format!(
+        "Add-Type -AssemblyName System.Windows.Forms; \
+         $f = New-Object System.Windows.Forms.FolderBrowserDialog; \
+         $f.Description = '{}'; \
+         $f.ShowNewFolderButton = $true; \
+         if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ $f.SelectedPath }}",
+        description
+    );
+
+    let output = std::process::Command::new("powershell")
+        .args(&["-NoProfile", "-Command", &ps_command])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path_str.is_empty() {
+            return Some(path_str);
+        }
+    }
+    None
+}
+
 pub fn install_shell_wrappers() -> std::result::Result<(), String> {
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(bin_dir) = current_exe.parent() {

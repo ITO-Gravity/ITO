@@ -980,14 +980,28 @@ async fn main() -> Result<()> {
                 }
             };
 
-            print!("\nIngrese la ruta absoluta del proyecto de {}: ", module_name);
-            io::stdout().flush().ok();
-            let mut path_input = String::new();
-            if io::stdin().read_line(&mut path_input).is_err() {
-                println!("{}", "Error al leer la ruta.".red());
-                std::process::exit(1);
-            }
-            let target_path = std::path::PathBuf::from(path_input.trim());
+            println!("\n📂 Abriendo explorador de Windows para seleccionar la carpeta del proyecto...");
+            let selected_path = ito::open_folder_dialog(&format!("Selecciona la carpeta de {}", module_name));
+            
+            let target_path = match selected_path {
+                Some(path) => {
+                    println!("✔ Carpeta seleccionada: {}", path.cyan().bold());
+                    ito::copy_to_clipboard(&path);
+                    println!("📋 Ruta copiada al portapapeles automáticamente.");
+                    std::path::PathBuf::from(path)
+                }
+                None => {
+                    println!("{}", "⚠ Diálogo cancelado. Ingrese la ruta manual:".yellow());
+                    print!("Ruta absoluta: ");
+                    io::stdout().flush().ok();
+                    let mut path_input = String::new();
+                    if io::stdin().read_line(&mut path_input).is_err() {
+                        println!("{}", "Error al leer la ruta.".red());
+                        std::process::exit(1);
+                    }
+                    std::path::PathBuf::from(path_input.trim())
+                }
+            };
 
             match ito::run_link(root, module_key, target_path.clone()) {
                 Ok(tool) => {
