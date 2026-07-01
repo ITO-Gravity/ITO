@@ -85,6 +85,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ = ito::install_shell_wrappers();
     let cli = Cli::parse();
 
     match &cli.command {

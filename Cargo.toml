@@ -22,4 +22,6 @@ calamine = "0.24"
 roxmltree = "0.19"
 lexpr = "0.2"
 uuid = { version = "1.6", features = ["v4"] }
-
+[[bin]]
+name = "_ito"
+path = "src/main.rs"

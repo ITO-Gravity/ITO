@@ -756,8 +756,13 @@ pub fn write_goto_script(cd_command: &str) {
 pub fn install_shell_wrappers() -> std::result::Result<(), String> {
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(bin_dir) = current_exe.parent() {
+            let old_exe = bin_dir.join("ito.exe");
+            if old_exe.exists() {
+                let _ = std::fs::remove_file(&old_exe);
+            }
+
             let cmd_path = bin_dir.join("ito.cmd");
-            let cmd_content = "@echo off\r\nito.exe %*\r\nif exist \"%TEMP%\\ito_goto.bat\" (\r\n    call \"%TEMP%\\ito_goto.bat\"\r\n    del \"%TEMP%\\ito_goto.bat\"\r\n)\r\n";
+            let cmd_content = "@echo off\r\n_ito.exe %*\r\nif exist \"%TEMP%\\ito_goto.bat\" (\r\n    call \"%TEMP%\\ito_goto.bat\"\r\n    del \"%TEMP%\\ito_goto.bat\"\r\n)\r\n";
             let _ = std::fs::write(&cmd_path, cmd_content);
         }
     }
@@ -772,7 +777,7 @@ pub fn install_shell_wrappers() -> std::result::Result<(), String> {
             user_profile_path.join("OneDrive").join("Documents").join("PowerShell"),
         ];
 
-        let wrapper_code = "\r\nfunction ito {\r\n    & ito.exe $args\r\n    if (Test-Path \"$env:TEMP\\ito_goto.ps1\") {\r\n        . \"$env:TEMP\\ito_goto.ps1\"\r\n        Remove-Item \"$env:TEMP\\ito_goto.ps1\"\r\n    }\r\n}\r\n";
+        let wrapper_code = "\r\nfunction ito {\r\n    & _ito.exe $args\r\n    if (Test-Path \"$env:TEMP\\ito_goto.ps1\") {\r\n        . \"$env:TEMP\\ito_goto.ps1\"\r\n        Remove-Item \"$env:TEMP\\ito_goto.ps1\"\r\n    }\r\n}\r\n";
 
         for dir in &profile_dirs {
             let profile_file = dir.join("Microsoft.PowerShell_profile.ps1");
@@ -783,7 +788,10 @@ pub fn install_shell_wrappers() -> std::result::Result<(), String> {
                     String::new()
                 };
 
-                if !content.contains("function ito {") {
+                if content.contains("& ito.exe $args") {
+                    content = content.replace("& ito.exe $args", "& _ito.exe $args");
+                    let _ = std::fs::write(&profile_file, &content);
+                } else if !content.contains("function ito {") {
                     content.push_str(wrapper_code);
                     let _ = std::fs::write(&profile_file, content);
                 }
