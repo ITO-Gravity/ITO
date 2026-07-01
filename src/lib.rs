@@ -3,6 +3,8 @@ pub mod parsers;
 pub mod diff;
 pub mod linter;
 pub mod engines;
+pub mod ignore;
+pub mod cas;
 
 use sha2::{Sha256, Digest};
 

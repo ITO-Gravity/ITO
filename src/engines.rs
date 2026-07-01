@@ -1,12 +1,12 @@
 // src/engines.rs
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::collections::HashMap;
-use std::io::Write;
 use crate::models::{HardwareDesign};
+use crate::ignore::IgnoreFilter;
+use crate::cas;
 use crate::parsers;
 use crate::diff;
-use sha2::{Sha256, Digest};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub enum ModuleStatus {
@@ -116,9 +116,47 @@ impl Engine for GitEngine {
 }
 
 // ----------------------------------------------------
+// Auxiliar: Escaneo recursivo respetando ignores
+// ----------------------------------------------------
+fn scan_directory_recursive(
+    root: &Path,
+    current: &Path,
+    filter: &IgnoreFilter,
+    files: &mut Vec<PathBuf>,
+) {
+    if filter.is_ignored(current) {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(current) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if filter.is_ignored(&path) {
+                continue;
+            }
+            if path.is_dir() {
+                scan_directory_recursive(root, &path, filter, files);
+            } else if path.is_file() {
+                files.push(path);
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------
 // 2. SemanticCadEngine (Electrónica)
 // ----------------------------------------------------
 pub struct SemanticCadEngine;
+
+impl SemanticCadEngine {
+    fn get_project_root(&self, backup_dir: &Path) -> PathBuf {
+        backup_dir.parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+}
 
 impl Engine for SemanticCadEngine {
     fn name(&self) -> &str {
@@ -192,40 +230,48 @@ impl Engine for SemanticCadEngine {
             details.extend(d);
         }
 
-        std::fs::create_dir_all(backup_dir).ok();
+        let project_root = self.get_project_root(backup_dir);
+        let objects_dir = project_root.join(".ito").join("objects");
+        std::fs::create_dir_all(&objects_dir).ok();
 
-        let zip_path = backup_dir.join("electronics.zip");
-        let zip_file = std::fs::File::create(&zip_path)
-            .map_err(|e| format!("Error al crear archivo zip: {}", e))?;
-        let mut zip = zip::ZipWriter::new(zip_file);
-        let options = zip::write::FileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let filter = IgnoreFilter::new(path);
+        let mut current_files = Vec::new();
+        scan_directory_recursive(path, path, &filter, &mut current_files);
 
-        std::fs::create_dir_all(cache_dir).ok();
-
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let file_path = entry.path();
-                if file_path.is_file() {
-                    let filename = entry.file_name().to_string_lossy().to_string();
-                    let ext_lower = file_path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-                    let is_cad_or_bom = ext_lower == "kicad_pcb" || ext_lower == "kicad_sch" || ext_lower == "brd" || ext_lower == "edif" || ext_lower == "edf" || ext_lower == "sch" || filename == "design.json" || filename.to_lowercase().contains("bom");
-                    
-                    if is_cad_or_bom {
-                        if let Ok(bytes) = std::fs::read(&file_path) {
-                            zip.start_file(&filename, options)
-                                .map_err(|e| format!("Error al añadir al zip: {}", e))?;
-                            zip.write_all(&bytes).ok();
-                            
-                            std::fs::write(cache_dir.join(&filename), &bytes).ok();
-                        }
-                    }
+        let mut current_hashes = HashMap::new();
+        for file_path in current_files {
+            if let Ok(hash) = cas::store_file(&file_path, &objects_dir) {
+                if let Ok(relative) = file_path.strip_prefix(path) {
+                    current_hashes.insert(relative.to_string_lossy().to_string().replace('\\', "/"), hash);
                 }
             }
         }
-        zip.finish().ok();
+
+        std::fs::create_dir_all(backup_dir).ok();
+        let manifest_content = serde_json::to_string_pretty(&current_hashes).unwrap_or_default();
         
-        metadata.insert("zip_file".to_string(), "electronics.zip".to_string());
+        let backup_manifest = backup_dir.join("manifest.json");
+        std::fs::write(&backup_manifest, &manifest_content).ok();
+
+        std::fs::create_dir_all(cache_dir).ok();
+        let cache_manifest = cache_dir.join("manifest.json");
+        std::fs::write(&cache_manifest, &manifest_content).ok();
+
+        if let Ok(entries) = std::fs::read_dir(cache_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() && entry.file_name() != "manifest.json" {
+                    std::fs::remove_file(p).ok();
+                }
+            }
+        }
+
+        for (rel_path, hash) in &current_hashes {
+            let cache_dest = cache_dir.join(rel_path);
+            cas::restore_file(hash, &cache_dest, &objects_dir).ok();
+        }
+
+        metadata.insert("manifest".to_string(), "manifest.json".to_string());
 
         Ok(CommitPayload {
             engine_name: self.name().to_string(),
@@ -236,45 +282,30 @@ impl Engine for SemanticCadEngine {
     }
 
     fn restore(&self, path: &Path, backup_dir: &Path, payload: &CommitPayload) -> Result<(), String> {
-        let zip_filename = payload.metadata.get("zip_file").cloned().unwrap_or_else(|| "electronics.zip".to_string());
-        let zip_path = backup_dir.join(zip_filename);
-        if !zip_path.exists() {
-            return Err(format!("No se encontró el archivo de respaldo: {}", zip_path.display()));
+        let manifest_filename = payload.metadata.get("manifest").cloned().unwrap_or_else(|| "manifest.json".to_string());
+        let manifest_path = backup_dir.join(manifest_filename);
+        if !manifest_path.exists() {
+            return Err(format!("No se encontró el manifiesto de respaldo: {}", manifest_path.display()));
         }
 
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let file_path = entry.path();
-                if file_path.is_file() {
-                    let filename = entry.file_name().to_string_lossy().to_string();
-                    let ext_lower = file_path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-                    let is_cad_or_bom = ext_lower == "kicad_pcb" || ext_lower == "kicad_sch" || ext_lower == "brd" || ext_lower == "edif" || ext_lower == "edf" || ext_lower == "sch" || filename == "design.json" || filename.to_lowercase().contains("bom");
-                    if is_cad_or_bom {
-                        std::fs::remove_file(file_path).ok();
-                    }
-                }
-            }
+        let content = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| format!("Error al leer manifiesto: {}", e))?;
+        let hashes: HashMap<String, String> = serde_json::from_str(&content)
+            .map_err(|e| format!("Error al parsear manifiesto: {}", e))?;
+
+        let project_root = self.get_project_root(backup_dir);
+        let objects_dir = project_root.join(".ito").join("objects");
+
+        let filter = IgnoreFilter::new(path);
+        let mut existing_files = Vec::new();
+        scan_directory_recursive(path, path, &filter, &mut existing_files);
+        for file in existing_files {
+            std::fs::remove_file(file).ok();
         }
 
-        let file = std::fs::File::open(&zip_path)
-            .map_err(|e| format!("Error al abrir ZIP: {}", e))?;
-        let mut archive = zip::ZipArchive::new(file)
-            .map_err(|e| format!("Error al leer ZIP: {}", e))?;
-
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i)
-                .map_err(|e| format!("Error al leer archivo en ZIP: {}", e))?;
-            let outpath = match file.enclosed_name() {
-                Some(path) => path.to_owned(),
-                None => continue,
-            };
-            let dest_path = path.join(outpath);
-            if let Some(p) = dest_path.parent() {
-                std::fs::create_dir_all(p).ok();
-            }
-            let mut outfile = std::fs::File::create(&dest_path)
-                .map_err(|e| format!("Error al crear archivo de destino: {}", e))?;
-            std::io::copy(&mut file, &mut outfile).ok();
+        for (rel_path, hash) in hashes {
+            let dest = path.join(rel_path);
+            cas::restore_file(&hash, &dest, &objects_dir)?;
         }
 
         Ok(())
@@ -287,34 +318,13 @@ impl Engine for SemanticCadEngine {
 pub struct FileHashEngine;
 
 impl FileHashEngine {
-    fn scan_and_hash(&self, path: &Path) -> HashMap<String, String> {
-        let mut hashes = HashMap::new();
-        self.scan_and_hash_recursive(path, path, &mut hashes);
-        hashes
-    }
-
-    fn scan_and_hash_recursive(&self, root: &Path, current: &Path, hashes: &mut HashMap<String, String>) {
-        if let Ok(entries) = std::fs::read_dir(current) {
-            for entry in entries.flatten() {
-                let file_path = entry.path();
-                let file_name = entry.file_name().to_string_lossy().to_string();
-                if file_name.starts_with('.') || file_name == "target" || file_name == "node_modules" {
-                    continue;
-                }
-                if file_path.is_dir() {
-                    self.scan_and_hash_recursive(root, &file_path, hashes);
-                } else if file_path.is_file() {
-                    if let Ok(bytes) = std::fs::read(&file_path) {
-                        let mut hasher = Sha256::new();
-                        hasher.update(&bytes);
-                        let hash = format!("{:x}", hasher.finalize());
-                        if let Ok(relative) = file_path.strip_prefix(root) {
-                            hashes.insert(relative.to_string_lossy().to_string().replace('\\', "/"), hash);
-                        }
-                    }
-                }
-            }
-        }
+    fn get_project_root(&self, backup_dir: &Path) -> PathBuf {
+        backup_dir.parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
     }
 }
 
@@ -328,11 +338,22 @@ impl Engine for FileHashEngine {
     }
 
     fn status(&self, path: &Path, cache_dir: &Path) -> Result<ModuleStatus, String> {
-        let current_hashes = self.scan_and_hash(path);
-        
-        let hash_json_path = cache_dir.join("hashes.json");
-        let old_hashes: HashMap<String, String> = if hash_json_path.exists() {
-            let content = std::fs::read_to_string(&hash_json_path).unwrap_or_default();
+        let filter = IgnoreFilter::new(path);
+        let mut current_files = Vec::new();
+        scan_directory_recursive(path, path, &filter, &mut current_files);
+
+        let mut current_hashes = HashMap::new();
+        for file_path in current_files {
+            if let Ok(hash) = cas::calculate_file_hash(&file_path) {
+                if let Ok(relative) = file_path.strip_prefix(path) {
+                    current_hashes.insert(relative.to_string_lossy().to_string().replace('\\', "/"), hash);
+                }
+            }
+        }
+
+        let manifest_path = cache_dir.join("manifest.json");
+        let old_hashes: HashMap<String, String> = if manifest_path.exists() {
+            let content = std::fs::read_to_string(&manifest_path).unwrap_or_default();
             serde_json::from_str(&content).unwrap_or_default()
         } else {
             HashMap::new()
@@ -396,33 +417,48 @@ impl Engine for FileHashEngine {
             details.extend(d);
         }
 
-        std::fs::create_dir_all(backup_dir).ok();
-        let zip_filename = "files.zip";
-        let zip_path = backup_dir.join(zip_filename);
-        let zip_file = std::fs::File::create(&zip_path)
-            .map_err(|e| format!("Error al crear zip: {}", e))?;
-        let mut zip = zip::ZipWriter::new(zip_file);
-        let options = zip::write::FileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let project_root = self.get_project_root(backup_dir);
+        let objects_dir = project_root.join(".ito").join("objects");
+        std::fs::create_dir_all(&objects_dir).ok();
 
-        std::fs::create_dir_all(cache_dir).ok();
-        let current_hashes = self.scan_and_hash(path);
-        let hash_json_path = cache_dir.join("hashes.json");
-        let hash_json_content = serde_json::to_string_pretty(&current_hashes).unwrap_or_default();
-        std::fs::write(&hash_json_path, hash_json_content).ok();
+        let filter = IgnoreFilter::new(path);
+        let mut current_files = Vec::new();
+        scan_directory_recursive(path, path, &filter, &mut current_files);
 
-        for file_rel in current_hashes.keys() {
-            let file_abs = path.join(file_rel);
-            if file_abs.is_file() {
-                if let Ok(bytes) = std::fs::read(&file_abs) {
-                    zip.start_file(file_rel, options).ok();
-                    zip.write_all(&bytes).ok();
+        let mut current_hashes = HashMap::new();
+        for file_path in current_files {
+            if let Ok(hash) = cas::store_file(&file_path, &objects_dir) {
+                if let Ok(relative) = file_path.strip_prefix(path) {
+                    current_hashes.insert(relative.to_string_lossy().to_string().replace('\\', "/"), hash);
                 }
             }
         }
-        zip.finish().ok();
 
-        metadata.insert("zip_file".to_string(), zip_filename.to_string());
+        std::fs::create_dir_all(backup_dir).ok();
+        let manifest_content = serde_json::to_string_pretty(&current_hashes).unwrap_or_default();
+        
+        let backup_manifest = backup_dir.join("manifest.json");
+        std::fs::write(&backup_manifest, &manifest_content).ok();
+
+        std::fs::create_dir_all(cache_dir).ok();
+        let cache_manifest = cache_dir.join("manifest.json");
+        std::fs::write(&cache_manifest, &manifest_content).ok();
+
+        if let Ok(entries) = std::fs::read_dir(cache_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() && entry.file_name() != "manifest.json" {
+                    std::fs::remove_file(p).ok();
+                }
+            }
+        }
+
+        for (rel_path, hash) in &current_hashes {
+            let cache_dest = cache_dir.join(rel_path);
+            cas::restore_file(hash, &cache_dest, &objects_dir).ok();
+        }
+
+        metadata.insert("manifest".to_string(), "manifest.json".to_string());
 
         Ok(CommitPayload {
             engine_name: self.name().to_string(),
@@ -433,31 +469,30 @@ impl Engine for FileHashEngine {
     }
 
     fn restore(&self, path: &Path, backup_dir: &Path, payload: &CommitPayload) -> Result<(), String> {
-        let zip_filename = payload.metadata.get("zip_file").cloned().unwrap_or_else(|| "files.zip".to_string());
-        let zip_path = backup_dir.join(zip_filename);
-        if !zip_path.exists() {
-            return Err(format!("No se encontró el archivo de respaldo: {}", zip_path.display()));
+        let manifest_filename = payload.metadata.get("manifest").cloned().unwrap_or_else(|| "manifest.json".to_string());
+        let manifest_path = backup_dir.join(manifest_filename);
+        if !manifest_path.exists() {
+            return Err(format!("No se encontró el manifiesto de respaldo: {}", manifest_path.display()));
         }
 
-        let file = std::fs::File::open(&zip_path)
-            .map_err(|e| format!("Error al abrir ZIP: {}", e))?;
-        let mut archive = zip::ZipArchive::new(file)
-            .map_err(|e| format!("Error al leer ZIP: {}", e))?;
+        let content = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| format!("Error al leer manifiesto: {}", e))?;
+        let hashes: HashMap<String, String> = serde_json::from_str(&content)
+            .map_err(|e| format!("Error al parsear manifiesto: {}", e))?;
 
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i)
-                .map_err(|e| format!("Error al leer archivo en ZIP: {}", e))?;
-            let outpath = match file.enclosed_name() {
-                Some(path) => path.to_owned(),
-                None => continue,
-            };
-            let dest_path = path.join(outpath);
-            if let Some(p) = dest_path.parent() {
-                std::fs::create_dir_all(p).ok();
-            }
-            let mut outfile = std::fs::File::create(&dest_path)
-                .map_err(|e| format!("Error al crear archivo de destino: {}", e))?;
-            std::io::copy(&mut file, &mut outfile).ok();
+        let project_root = self.get_project_root(backup_dir);
+        let objects_dir = project_root.join(".ito").join("objects");
+
+        let filter = IgnoreFilter::new(path);
+        let mut existing_files = Vec::new();
+        scan_directory_recursive(path, path, &filter, &mut existing_files);
+        for file in existing_files {
+            std::fs::remove_file(file).ok();
+        }
+
+        for (rel_path, hash) in hashes {
+            let dest = path.join(rel_path);
+            cas::restore_file(&hash, &dest, &objects_dir)?;
         }
 
         Ok(())
