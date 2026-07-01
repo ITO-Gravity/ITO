@@ -1055,8 +1055,9 @@ async fn main() -> Result<()> {
                 println!("\n{}", name.bold());
                 if let Some(link) = links_map.get(*key) {
                     println!("  {}", "✔ Vinculado".green().bold());
-                    println!("  {}", link.tool.cyan());
-                    println!("  {}", link.path.dimmed());
+                    println!("  Herramienta: {}", link.tool.cyan());
+                    println!("  Motor:       {}", link.engine.yellow());
+                    println!("  Ruta:        {}", link.path.dimmed());
                 } else {
                     println!("  {}", "❌ No vinculado".red());
                 }
