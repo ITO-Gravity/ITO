@@ -141,11 +141,11 @@ async fn main() -> Result<()> {
                     println!("{} (Sin módulos enlazados - Analizando raíz)", "Electrónica".bold());
                     match parsers::parse_project_directory(&current_dir) {
                         Ok(design) => {
-                            println!("  ✔ CAD/Esquema: {} componentes cargados.", design.components.len());
-                            println!("  ✔ Nets: {} conexiones eléctricas encontradas.", design.nets.len());
+                            println!("  [OK] CAD/Esquema: {} componentes cargados.", design.components.len());
+                            println!("  [OK] Nets: {} conexiones eléctricas encontradas.", design.nets.len());
                         }
                         Err(e) => {
-                            println!("  ⚠ No se encontraron archivos de hardware válidos en la raíz: {}", e);
+                            println!("  Warning: No se encontraron archivos de hardware válidos en la raíz: {}", e);
                         }
                     }
                 } else {
@@ -178,7 +178,7 @@ async fn main() -> Result<()> {
                                     println!("  {}", "Sin cambios".green());
                                 }
                                 Ok(ito::engines::ModuleStatus::Modified { summary, details }) => {
-                                    println!("  ✔ {}", summary.yellow());
+                                    println!("  [MODIFIED] {}", summary.yellow());
                                     for detail in details.iter().take(5) {
                                         println!("    {}", detail.dimmed());
                                     }
@@ -187,10 +187,10 @@ async fn main() -> Result<()> {
                                     }
                                 }
                                 Ok(ito::engines::ModuleStatus::Error(e)) => {
-                                    println!("  ⚠ Error de análisis: {}", e.red());
+                                    println!("  Warning: Error de análisis: {}", e.red());
                                 }
                                 Err(e) => {
-                                    println!("  ⚠ Error: {}", e.red());
+                                    println!("  Warning: {}", e.red());
                                 }
                             }
                             println!();
@@ -198,11 +198,11 @@ async fn main() -> Result<()> {
                     }
                 }
             } else {
-                println!("{}", "⚠ No se detectó ninguna relación con un proyecto de Ito activo.".yellow());
+                println!("{}", "Warning: No se detectó ninguna relación con un proyecto de Ito activo.".yellow());
             }
 
-            println!("💡 {} Si realizaste modificaciones, puedes comparar los cambios semánticos con: {}", "Consejo:".bold(), "ito diff".cyan());
-            println!("💡 {} Si estás listo para guardar esta versión localmente, ejecuta: {}", "Consejo:".bold(), "ito commit -m \"Mensaje\"".cyan());
+            println!("Note: Si realizaste modificaciones, puedes comparar los cambios semánticos con: {}", "ito diff".cyan());
+            println!("Note: Si estás listo para guardar esta versión localmente, ejecuta: {}", "ito commit -m \"Mensaje\"".cyan());
         }
         Commands::Diff { path, json } => {
             let current_dir = std::env::current_dir()?;
@@ -456,7 +456,7 @@ async fn main() -> Result<()> {
             }
 
             println!("");
-            println!("💡 {} Si estás de acuerdo con estos cambios, puedes guardarlos localmente con: {}", "Consejo:".bold(), "ito commit -m \"Mensaje\"".cyan());
+            println!("Note: Si estás de acuerdo con estos cambios, puedes guardarlos localmente con: {}", "ito commit -m \"Mensaje\"".cyan());
         }
         Commands::Commit { message, force } => {
             let current_dir = std::env::current_dir()?;
@@ -483,7 +483,7 @@ async fn main() -> Result<()> {
                 let critical_count = issues.iter().filter(|i| i.severity == linter::LintSeverity::Critical).count();
                 if critical_count > 0 && !*force {
                     use colored::Colorize;
-                    println!("{}", "❌ Error: Se detectaron errores críticos en el diseño de hardware:".red().bold());
+                    println!("{}", "Error: Se detectaron errores críticos en el diseño de hardware:".red().bold());
                     for issue in &issues {
                         if issue.severity == linter::LintSeverity::Critical {
                             println!("  - [{}] {}", issue.rule_id.red().bold(), issue.message);
@@ -498,7 +498,7 @@ async fn main() -> Result<()> {
             match ito::run_commit(project_root, message.clone()) {
                 Ok(commit) => {
                     use colored::Colorize;
-                    println!("{}", "✔ Respaldo de diseño guardado localmente con éxito.".green().bold());
+                    println!("{}", "Respaldo de diseño guardado localmente con éxito.".green().bold());
                     println!("Hash:    {}", commit.hash.cyan());
                     println!("Mensaje: {}", commit.message.bold());
                     println!("Fecha:   {}", commit.timestamp.dimmed());
@@ -506,7 +506,7 @@ async fn main() -> Result<()> {
                     if !commit.modules.is_empty() {
                         println!("\nResumen por módulo:");
                         for (mod_name, payload) in &commit.modules {
-                            let status_indicator = if payload.changes_detected { "✔".yellow() } else { "✔".green() };
+                            let status_indicator = if payload.changes_detected { "[MODIFIED]".yellow() } else { "[OK]".green() };
                             println!("  {} [{}]: {}", status_indicator, mod_name.bold(), payload.engine_name.cyan());
                             for detail in &payload.details {
                                 println!("    {}", detail.dimmed());
@@ -527,7 +527,7 @@ async fn main() -> Result<()> {
                             summary.modified_nets.to_string().yellow()
                         );
                     }
-                    println!("\n💡 {} Puedes ver el historial de versiones con: {}", "Consejo:".bold(), "ito log".cyan());
+                    println!("\nNote: Puedes ver el historial de versiones con: {}", "ito log".cyan());
                 }
                 Err(err_msg) => {
                     if err_msg.contains("No hay cambios pendientes") {
@@ -546,7 +546,7 @@ async fn main() -> Result<()> {
             let root = match ito::find_project_root(&current_dir) {
                 Some(r) => r,
                 None => {
-                    println!("{}", "❌ Error: No se encontró la raíz del proyecto. ¿Ejecutaste 'ito init' o 'ito new' primero?".red().bold());
+                    println!("{}", "Error: No se encontró la raíz del proyecto. ¿Ejecutaste 'ito init' o 'ito new' primero?".red().bold());
                     std::process::exit(1);
                 }
             };
@@ -554,7 +554,7 @@ async fn main() -> Result<()> {
             let history_path = root.join(".ito").join("history.toml");
             if !history_path.exists() {
                 println!("{}", "No hay ningún commit registrado en este repositorio todavía.".yellow());
-                println!("\n💡 {} Comienza guardando una versión con: {}", "Consejo:".bold(), "ito commit -m \"Mensaje\"".cyan());
+                println!("\nNote: Comienza guardando una versión con: {}", "ito commit -m \"Mensaje\"".cyan());
                 return Ok(());
             }
 
@@ -563,7 +563,7 @@ async fn main() -> Result<()> {
 
             if history.commits.is_empty() {
                 println!("{}", "No hay ningún commit registrado en este repositorio todavía.".yellow());
-                println!("\n💡 {} Comienza guardando una versión con: {}", "Consejo:".bold(), "ito commit -m \"Mensaje\"".cyan());
+                println!("\nNote: Comienza guardando una versión con: {}", "ito commit -m \"Mensaje\"".cyan());
                 return Ok(());
             }
 
@@ -619,7 +619,7 @@ async fn main() -> Result<()> {
                 println!("------------------------------------------------------------");
             }
 
-            println!("\n💡 {} Si deseas restaurar tu diseño a una versión anterior, ejecuta: {}", "Consejo:".bold(), "ito restore <hash_corto>".cyan());
+            println!("\nNote: Si deseas restaurar tu diseño a una versión anterior, ejecuta: {}", "ito restore <hash_corto>".cyan());
         }
         Commands::Restore { hash } => {
             use std::io::{self, Write};
@@ -629,7 +629,7 @@ async fn main() -> Result<()> {
             let root = match ito::find_project_root(&current_dir) {
                 Some(r) => r,
                 None => {
-                    println!("{}", "❌ Error: No se encontró la raíz del proyecto. ¿Ejecutaste 'ito init' o 'ito new' primero?".red().bold());
+                    println!("{}", "Error: No se encontró la raíz del proyecto. ¿Ejecutaste 'ito init' o 'ito new' primero?".red().bold());
                     std::process::exit(1);
                 }
             };
@@ -645,7 +645,7 @@ async fn main() -> Result<()> {
             let diff_result = diff::diff_designs(&old_design, &new_design);
 
             if !diff_result.is_empty() {
-                println!("{}", "⚠ Advertencia: Tienes cambios no guardados en tu diseño de hardware actual.".yellow().bold());
+                println!("{}", "Warning: Tienes cambios no guardados en tu diseño de hardware actual.".yellow().bold());
                 println!("Si restauras otra versión, perderás de forma permanente los cambios actuales.");
                 print!("¿Deseas continuar de todas formas? [s/N]: ");
                 io::stdout().flush().ok();
@@ -664,15 +664,15 @@ async fn main() -> Result<()> {
 
             match ito::run_restore(root, hash) {
                 Ok(restored_files) => {
-                    println!("\n{}", "✔ Diseño de hardware restaurado correctamente con éxito.".green().bold());
+                    println!("\n{}", "Diseño de hardware restaurado correctamente con éxito.".green().bold());
                     println!("Archivos recuperados:");
                     for file in restored_files {
                         println!("  - {}", file.cyan());
                     }
-                    println!("\n💡 {} Puedes verificar el estado de tu diseño con: {}", "Consejo:".bold(), "ito status".cyan());
+                    println!("\nNote: Puedes verificar el estado de tu diseño con: {}", "ito status".cyan());
                 }
                 Err(err) => {
-                    println!("{}", format!("❌ Error: {}", err).red().bold());
+                    println!("{}", format!("Error: {}", err).red().bold());
                     std::process::exit(1);
                 }
             }
@@ -689,25 +689,25 @@ async fn main() -> Result<()> {
                 use colored::Colorize;
                 println!("{}", "=== REGLAS ELÉCTRICAS DE DISEÑO (ERC) ===".bold());
                 if issues.is_empty() {
-                    println!("{}", "✅ No se detectó ninguna anomalía en el diseño.".green().bold());
+                    println!("{}", "No se detectó ninguna anomalía en el diseño.".green().bold());
                 } else {
                     for issue in &issues {
                         match issue.severity {
                             linter::LintSeverity::Critical => {
-                                println!("\n🔴 [CRITICAL] [{}] {}", issue.rule_id.red().bold(), issue.message.red());
+                                println!("\n[CRITICAL] [{}] {}", issue.rule_id.red().bold(), issue.message.red());
                                 println!("   {}", issue.details.dimmed());
                             }
                             linter::LintSeverity::Warning => {
-                                println!("\n🟡 [WARNING] [{}] {}", issue.rule_id.yellow().bold(), issue.message.yellow());
+                                println!("\n[WARNING] [{}] {}", issue.rule_id.yellow().bold(), issue.message.yellow());
                                 println!("   {}", issue.details.dimmed());
                             }
                             linter::LintSeverity::Info => {
-                                println!("\n🔵 [INFO] [{}] {}", issue.rule_id.blue().bold(), issue.message.blue());
+                                println!("\n[INFO] [{}] {}", issue.rule_id.blue().bold(), issue.message.blue());
                                 println!("   {}", issue.details.dimmed());
                             }
                         }
                     }
-                    println!("\n🔍 Resumen: {} crítico(s), {} advertencia(s).", 
+                    println!("\nResumen: {} crítico(s), {} advertencia(s).", 
                              critical_count.to_string().red().bold(), 
                              warning_count.to_string().yellow().bold());
                 }
@@ -762,11 +762,11 @@ async fn main() -> Result<()> {
                         }
                     };
                     if let Err(err) = ito::save_workspace_config(&chosen_path) {
-                        println!("{}", format!("❌ Error al guardar la configuración del Workspace: {}", err).red().bold());
+                        println!("{}", format!("Error al guardar la configuración del Workspace: {}", err).red().bold());
                         std::process::exit(1);
                     }
                     
-                    println!("✔ Workspace configurado en: {}\n", chosen_path.display().to_string().cyan());
+                    println!("Workspace configurado en: {}\n", chosen_path.display().to_string().cyan());
                     
                     ito::models::ItoWorkspaceConfig {
                         workspace: chosen_path.to_string_lossy().to_string(),
@@ -775,7 +775,7 @@ async fn main() -> Result<()> {
                 }
                 Err(err) => {
                     use colored::Colorize;
-                    println!("{}", format!("❌ Error al cargar configuración global: {}", err).red().bold());
+                    println!("{}", format!("Error al cargar configuración global: {}", err).red().bold());
                     std::process::exit(1);
                 }
             };
@@ -786,16 +786,16 @@ async fn main() -> Result<()> {
             match ito::run_new(projects_dir, name) {
                 Ok((path, uuid)) => {
                     use colored::Colorize;
-                    println!("✔ Proyecto creado correctamente.\n");
+                    println!("Proyecto creado correctamente.\n");
                     println!("Proyecto: {}", name.cyan().bold());
                     println!("UUID: {}", uuid.cyan());
                     println!("Ubicación: {}\n", path.display().to_string().cyan());
                     println!("{}", "ITO está listo para comenzar el versionado.".green().bold());
-                    println!("\n💡 {} Ingresa a la carpeta del proyecto y vincula tus módulos con: {}", "Consejo:".bold(), "ito link".cyan());
+                    println!("\nNote: Ingresa a la carpeta del proyecto y vincula tus módulos con: {}", "ito link".cyan());
                 }
                 Err(err) => {
                     use colored::Colorize;
-                    println!("{}", format!("❌ Error: {}", err).red().bold());
+                    println!("{}", format!("Error: {}", err).red().bold());
                     std::process::exit(1);
                 }
             }
@@ -818,7 +818,7 @@ async fn main() -> Result<()> {
                             println!("Ejecuta 'ito new <NombreProyecto>' o 'ito workspace set' para configurarlo.");
                         }
                         Err(err) => {
-                            println!("{}", format!("❌ Error: {}", err).red().bold());
+                            println!("{}", format!("Error: {}", err).red().bold());
                             std::process::exit(1);
                         }
                     }
@@ -842,11 +842,11 @@ async fn main() -> Result<()> {
                     };
 
                     if let Err(err) = ito::save_workspace_config(&chosen_path) {
-                        println!("{}", format!("❌ Error al guardar el nuevo Workspace: {}", err).red().bold());
+                        println!("{}", format!("Error al guardar el nuevo Workspace: {}", err).red().bold());
                         std::process::exit(1);
                     }
 
-                    println!("✔ Workspace actualizado correctamente a: {}\n", chosen_path.display().to_string().cyan());
+                    println!("Workspace actualizado correctamente a: {}\n", chosen_path.display().to_string().cyan());
                     println!("{}", "Nota: Los proyectos existentes no han sido movidos automáticamente.".yellow());
                 }
             }
@@ -931,10 +931,10 @@ async fn main() -> Result<()> {
             ito::write_goto_script(&cd_command);
             let _ = ito::install_shell_wrappers();
 
-            println!("\n✔ Proyecto seleccionado: {}", chosen_project.name.cyan().bold());
+            println!("\nProyecto seleccionado: {}", chosen_project.name.cyan().bold());
             println!("Ruta: {}", chosen_project.path.display().to_string().cyan());
-            println!("\n🚀 Navegación automática ejecutada (abre una nueva terminal para activar el autocompletado si no te movió de inmediato).");
-            println!("📋 (Comando cd copiado al portapapeles como respaldo)");
+            println!("\nNavegación automática ejecutada (abre una nueva terminal para activar el autocompletado si no se actualizó de inmediato).");
+            println!("(Comando cd copiado al portapapeles como respaldo)");
         }
         Commands::Link => {
             use std::io::{self, Write};
@@ -944,7 +944,7 @@ async fn main() -> Result<()> {
             let root = match ito::find_project_root(&current_dir) {
                 Some(r) => r,
                 None => {
-                    println!("{}", "❌ Error: No se encontró la raíz del proyecto. ¿Ejecutaste 'ito init' o 'ito new' primero?".red().bold());
+                    println!("{}", "Error: No se encontró la raíz del proyecto. ¿Ejecutaste 'ito init' o 'ito new' primero?".red().bold());
                     std::process::exit(1);
                 }
             };
@@ -980,18 +980,18 @@ async fn main() -> Result<()> {
                 }
             };
 
-            println!("\n📂 Abriendo explorador de Windows para seleccionar la carpeta del proyecto...");
+            println!("\nAbriendo explorador de Windows para seleccionar la carpeta del proyecto...");
             let selected_path = ito::open_folder_dialog(&format!("Selecciona la carpeta de {}", module_name));
             
             let target_path = match selected_path {
                 Some(path) => {
-                    println!("✔ Carpeta seleccionada: {}", path.cyan().bold());
+                    println!("Carpeta seleccionada: {}", path.cyan().bold());
                     ito::copy_to_clipboard(&path);
-                    println!("📋 Ruta copiada al portapapeles automáticamente.");
+                    println!("Ruta copiada al portapapeles automáticamente.");
                     std::path::PathBuf::from(path)
                 }
                 None => {
-                    println!("{}", "⚠ Diálogo cancelado. Ingrese la ruta manual:".yellow());
+                    println!("{}", "Warning: Diálogo cancelado. Ingrese la ruta manual:".yellow());
                     print!("Ruta absoluta: ");
                     io::stdout().flush().ok();
                     let mut path_input = String::new();
@@ -1006,16 +1006,16 @@ async fn main() -> Result<()> {
             match ito::run_link(root, module_key, target_path.clone()) {
                 Ok(tool) => {
                     if tool == "Unknown" {
-                        println!("\n{}", "⚠ No se pudo identificar automáticamente el software de desarrollo en la carpeta.".yellow());
+                        println!("\n{}", "Warning: No se pudo identificar automáticamente el software de desarrollo en la carpeta.".yellow());
                     } else {
-                        println!("\n✔ Proyecto {} detectado.", tool.green().bold());
+                        println!("\nProyecto {} detectado.", tool.green().bold());
                     }
-                    println!("✔ Módulo {} vinculado correctamente a: {}\n", module_name.green().bold(), target_path.display().to_string().cyan());
-                    println!("💡 {} Puedes auditar tus enlaces en cualquier momento con: {}", "Consejo:".bold(), "ito links".cyan());
-                    println!("💡 {} Si ya vinculaste tus módulos principales, verifica el estado de tu diseño con: {}", "Consejo:".bold(), "ito status".cyan());
+                    println!("Módulo {} vinculado correctamente a: {}\n", module_name.green().bold(), target_path.display().to_string().cyan());
+                    println!("Note: Puedes auditar tus enlaces en cualquier momento con: {}", "ito links".cyan());
+                    println!("Note: Si ya vinculaste tus módulos principales, verifica el estado de tu diseño con: {}", "ito status".cyan());
                 }
                 Err(err) => {
-                    println!("{}", format!("❌ Error: {}", err).red().bold());
+                    println!("{}", format!("Error: {}", err).red().bold());
                     std::process::exit(1);
                 }
             }
@@ -1027,21 +1027,21 @@ async fn main() -> Result<()> {
             let root = match ito::find_project_root(&current_dir) {
                 Some(r) => r,
                 None => {
-                    println!("{}", "❌ Error: No se encontró la raíz del proyecto. ¿Ejecutaste 'ito init' o 'ito new' primero?".red().bold());
+                    println!("{}", "Error: No se encontró la raíz del proyecto. ¿Ejecutaste 'ito init' o 'ito new' primero?".red().bold());
                     std::process::exit(1);
                 }
             };
 
             let ito_json_path = root.join("ito.json");
             if !ito_json_path.exists() {
-                println!("{}", "❌ Error: No se encontró el archivo ito.json en el proyecto actual.".red().bold());
+                println!("{}", "Error: No se encontró el archivo ito.json en el proyecto actual.".red().bold());
                 std::process::exit(1);
             }
 
             let content = match std::fs::read_to_string(&ito_json_path) {
                 Ok(c) => c,
                 Err(e) => {
-                    println!("{}", format!("❌ Error al leer ito.json: {}", e).red().bold());
+                    println!("{}", format!("Error al leer ito.json: {}", e).red().bold());
                     std::process::exit(1);
                 }
             };
@@ -1049,7 +1049,7 @@ async fn main() -> Result<()> {
             let config: ito::models::ItoProjectConfig = match serde_json::from_str(&content) {
                 Ok(cfg) => cfg,
                 Err(e) => {
-                    println!("{}", format!("❌ Error al parsear ito.json: {}", e).red().bold());
+                    println!("{}", format!("Error al parsear ito.json: {}", e).red().bold());
                     std::process::exit(1);
                 }
             };
@@ -1071,12 +1071,12 @@ async fn main() -> Result<()> {
             for (key, name) in &modules {
                 println!("\n{}", name.bold());
                 if let Some(link) = links_map.get(*key) {
-                    println!("  {}", "✔ Vinculado".green().bold());
+                    println!("  {}", "Vinculado".green().bold());
                     println!("  Herramienta: {}", link.tool.cyan());
                     println!("  Motor:       {}", link.engine.yellow());
                     println!("  Ruta:        {}", link.path.dimmed());
                 } else {
-                    println!("  {}", "❌ No vinculado".red());
+                    println!("  {}", "No vinculado".red());
                 }
             }
         }
@@ -1088,14 +1088,14 @@ async fn main() -> Result<()> {
             let root = match ito::find_project_root(&current_dir) {
                 Some(r) => r,
                 None => {
-                    println!("{}", "❌ Error: No se encontró ningún proyecto de Ito asociado.".red().bold());
+                    println!("{}", "Error: No se encontró ningún proyecto de Ito asociado.".red().bold());
                     std::process::exit(1);
                 }
             };
 
             let ito_json_path = root.join("ito.json");
             if !ito_json_path.exists() {
-                println!("{}", "❌ Error: No se encontró el archivo ito.json en el proyecto.".red().bold());
+                println!("{}", "Error: No se encontró el archivo ito.json en el proyecto.".red().bold());
                 std::process::exit(1);
             }
 
@@ -1118,7 +1118,7 @@ async fn main() -> Result<()> {
                     match matched {
                         Some((k, n)) => (k.to_string(), n.to_string()),
                         None => {
-                            println!("{}", format!("❌ Error: Módulo '{}' no válido. Use uno de: firmware, electronics, mechanical, documentation, manufacturing.", m_arg).red());
+                            println!("{}", format!("Error: Módulo '{}' no válido. Use uno de: firmware, electronics, mechanical, documentation, manufacturing.", m_arg).red());
                             std::process::exit(1);
                         }
                     }
@@ -1160,13 +1160,13 @@ async fn main() -> Result<()> {
                 ito::copy_to_clipboard(&cd_command);
                 ito::write_goto_script(&cd_command);
                 let _ = ito::install_shell_wrappers();
-                println!("\n✔ Módulo seleccionado: {}", target_name.cyan().bold());
+                println!("\nMódulo seleccionado: {}", target_name.cyan().bold());
                 println!("Ruta: {}", link.path.cyan());
-                println!("\n🚀 Navegación automática ejecutada.");
-                println!("📋 (Comando cd copiado al portapapeles como respaldo)");
+                println!("\nNavegación automática ejecutada.");
+                println!("(Comando cd copiado al portapapeles como respaldo)");
             } else {
-                println!("\n❌ El módulo {} no está vinculado todavía.", target_name.red().bold());
-                println!("💡 {} Vincúlalo primero con: {}", "Consejo:".bold(), format!("ito link").cyan());
+                println!("\nEl módulo {} no está vinculado todavía.", target_name.red().bold());
+                println!("Note: Vincúlalo primero con: {}", format!("ito link").cyan());
             }
         }
     }
