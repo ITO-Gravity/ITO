@@ -952,6 +952,17 @@ pub fn get_latest_design_json(project_dir: &std::path::Path) -> std::result::Res
 
 pub fn create_project_zip(project_dir: &std::path::Path) -> std::result::Result<Vec<u8>, String> {
     use std::io::Write;
+
+    let mut links = std::collections::HashMap::new();
+    let ito_json_path = project_dir.join("ito.json");
+    if ito_json_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&ito_json_path) {
+            if let Ok(config) = serde_json::from_str::<models::ItoProjectConfig>(&content) {
+                links = config.links.unwrap_or_default();
+            }
+        }
+    }
+
     let filter = ignore::IgnoreFilter::new(project_dir);
     let mut buffer = Vec::new();
     {
@@ -959,17 +970,20 @@ pub fn create_project_zip(project_dir: &std::path::Path) -> std::result::Result<
         let options = zip::write::FileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
 
-        fn walk_and_zip(
+        fn walk_and_zip_dir(
             dir: &std::path::Path,
-            project_dir: &std::path::Path,
+            base_dir: &std::path::Path,
+            prefix_in_zip: &str,
             filter: &ignore::IgnoreFilter,
             zip: &mut zip::ZipWriter<std::io::Cursor<&mut Vec<u8>>>,
             options: zip::write::FileOptions,
+            links: &std::collections::HashMap<String, models::ItoProjectLink>,
+            is_root_walk: bool,
         ) -> std::result::Result<(), String> {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    let relative_path = path.strip_prefix(project_dir)
+                    let relative_path = path.strip_prefix(base_dir)
                         .map_err(|e| format!("Error de ruta: {}", e))?;
                     
                     if filter.is_ignored(&relative_path) {
@@ -977,9 +991,21 @@ pub fn create_project_zip(project_dir: &std::path::Path) -> std::result::Result<
                     }
 
                     if path.is_dir() {
-                        walk_and_zip(&path, project_dir, filter, zip, options)?;
+                        let dir_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                        
+                        if is_root_walk && links.contains_key(dir_name) {
+                            continue;
+                        }
+
+                        walk_and_zip_dir(&path, base_dir, prefix_in_zip, filter, zip, options, links, is_root_walk)?;
                     } else if path.is_file() {
-                        let file_name_in_zip = relative_path.to_string_lossy().replace('\\', "/");
+                        let rel_str = relative_path.to_string_lossy().replace('\\', "/");
+                        let file_name_in_zip = if prefix_in_zip.is_empty() {
+                            rel_str
+                        } else {
+                            format!("{}/{}", prefix_in_zip, rel_str)
+                        };
+
                         zip.start_file(&file_name_in_zip, options)
                             .map_err(|e| format!("Error al iniciar archivo zip: {}", e))?;
                         
@@ -993,7 +1019,16 @@ pub fn create_project_zip(project_dir: &std::path::Path) -> std::result::Result<
             Ok(())
         }
 
-        walk_and_zip(project_dir, project_dir, &filter, &mut zip, options)?;
+        walk_and_zip_dir(project_dir, project_dir, "", &filter, &mut zip, options, &links, true)?;
+
+        for (module_name, link) in &links {
+            let external_path = std::path::Path::new(&link.path);
+            if external_path.exists() && external_path.is_dir() {
+                let ext_filter = ignore::IgnoreFilter::new(external_path);
+                walk_and_zip_dir(external_path, external_path, module_name, &ext_filter, &mut zip, options, &links, false)?;
+            }
+        }
+
         zip.finish()
             .map_err(|e| format!("Error al finalizar archivo zip: {}", e))?;
     }
