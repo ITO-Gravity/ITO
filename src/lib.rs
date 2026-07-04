@@ -895,6 +895,56 @@ pub fn get_latest_design_json(project_dir: &std::path::Path) -> std::result::Res
     Ok((design_json, bom_csv))
 }
 
+pub fn create_project_zip(project_dir: &std::path::Path) -> std::result::Result<Vec<u8>, String> {
+    use std::io::Write;
+    let filter = ignore::IgnoreFilter::new(project_dir);
+    let mut buffer = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buffer));
+        let options = zip::write::FileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+
+        fn walk_and_zip(
+            dir: &std::path::Path,
+            project_dir: &std::path::Path,
+            filter: &ignore::IgnoreFilter,
+            zip: &mut zip::ZipWriter<std::io::Cursor<&mut Vec<u8>>>,
+            options: zip::write::FileOptions,
+        ) -> std::result::Result<(), String> {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let relative_path = path.strip_prefix(project_dir)
+                        .map_err(|e| format!("Error de ruta: {}", e))?;
+                    
+                    if filter.is_ignored(&relative_path) {
+                        continue;
+                    }
+
+                    if path.is_dir() {
+                        walk_and_zip(&path, project_dir, filter, zip, options)?;
+                    } else if path.is_file() {
+                        let file_name_in_zip = relative_path.to_string_lossy().replace('\\', "/");
+                        zip.start_file(&file_name_in_zip, options)
+                            .map_err(|e| format!("Error al iniciar archivo zip: {}", e))?;
+                        
+                        let content = std::fs::read(&path)
+                            .map_err(|e| format!("Error al leer archivo {}: {}", path.display(), e))?;
+                        zip.write_all(&content)
+                            .map_err(|e| format!("Error al escribir archivo en zip: {}", e))?;
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        walk_and_zip(project_dir, project_dir, &filter, &mut zip, options)?;
+        zip.finish()
+            .map_err(|e| format!("Error al finalizar archivo zip: {}", e))?;
+    }
+    Ok(buffer)
+}
+
 pub async fn run_push(project_dir: std::path::PathBuf) -> std::result::Result<String, String> {
     let ito_dir = project_dir.join(".ito");
     let config_path = ito_dir.join("config.toml");
@@ -922,6 +972,9 @@ pub async fn run_push(project_dir: std::path::PathBuf) -> std::result::Result<St
 
     let (design_json, bom_csv) = get_latest_design_json(&project_dir)?;
 
+    println!("Empaquetando directorios del proyecto...");
+    let project_zip_bytes = create_project_zip(&project_dir)?;
+
     let client = reqwest::Client::new();
     
     let mut form = reqwest::multipart::Form::new()
@@ -945,6 +998,12 @@ pub async fn run_push(project_dir: std::path::PathBuf) -> std::result::Result<St
             .map_err(|e| format!("Error al preparar archivo BOM: {}", e))?;
         form = form.part("bom_csv", bom_part);
     }
+
+    let zip_part = reqwest::multipart::Part::bytes(project_zip_bytes)
+        .file_name("project_files.zip")
+        .mime_str("application/zip")
+        .map_err(|e| format!("Error al preparar archivo ZIP del proyecto: {}", e))?;
+    form = form.part("project_zip", zip_part);
 
     println!("Subiendo versión {} a {}...", &latest_commit.hash[..8], &config.remote_url);
     let response = client.post(&config.remote_url)
@@ -1036,6 +1095,59 @@ pub async fn run_pull(project_dir: std::path::PathBuf) -> std::result::Result<St
     if let Some(latest_local) = history.commits.last() {
         if latest_local.hash == version_hash {
             return Ok(format!("Ya estás actualizado a la última versión del servidor ({}).", &version_hash[..8]));
+        }
+    }
+
+    println!("Descargando versión completa {} desde el servidor...", &version_hash[..8]);
+    let mut zip_params = std::collections::HashMap::new();
+    zip_params.insert("action", "download_zip");
+    zip_params.insert("project_id", &config.project_id);
+    zip_params.insert("token", &token);
+    zip_params.insert("version_hash", version_hash);
+
+    let zip_response = client.post(&config.remote_url)
+        .form(&zip_params)
+        .send()
+        .await
+        .map_err(|e| format!("Error al descargar el paquete del proyecto: {}", e))?;
+
+    let zip_status = zip_response.status();
+    if !zip_status.is_success() {
+        let zip_err_body = zip_response.text().await.unwrap_or_default();
+        let mut err_msg = format!("El servidor respondió con código {} al descargar el ZIP.", zip_status);
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&zip_err_body) {
+            if let Some(msg) = json.get("message").and_then(|m| m.as_str()) {
+                err_msg = msg.to_string();
+            }
+        }
+        return Err(err_msg);
+    }
+
+    let zip_bytes = zip_response.bytes().await
+        .map_err(|e| format!("Error al leer los bytes del ZIP: {}", e))?;
+
+    println!("Extrayendo archivos del proyecto...");
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))
+        .map_err(|e| format!("Error al abrir archivo ZIP: {}", e))?;
+
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)
+            .map_err(|e| format!("Error al leer entrada del ZIP: {}", e))?;
+        let outpath = match file.enclosed_name() {
+            Some(path) => project_dir.join(path),
+            None => continue,
+        };
+
+        if file.name().ends_with('/') {
+            std::fs::create_dir_all(&outpath).ok();
+        } else {
+            if let Some(p) = outpath.parent() {
+                std::fs::create_dir_all(p).ok();
+            }
+            let mut outfile = std::fs::File::create(&outpath)
+                .map_err(|e| format!("Error al crear archivo local: {}", e))?;
+            std::io::copy(&mut file, &mut outfile)
+                .map_err(|e| format!("Error al escribir archivo: {}", e))?;
         }
     }
 
