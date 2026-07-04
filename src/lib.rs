@@ -61,11 +61,35 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
     }
 
     let registry = engines::EngineRegistry::new();
-    let mut active_modules = Vec::new();
+    let mut active_modules: Vec<(String, std::path::PathBuf, String)> = Vec::new();
     if let Some(ref cfg) = config {
-        if let Some(ref links) = cfg.links {
-            for (key, link) in links {
-                active_modules.push((key.clone(), std::path::PathBuf::from(&link.path), link.engine.clone()));
+        let has_links = cfg.links.as_ref().map(|l| !l.is_empty()).unwrap_or(false);
+        if has_links {
+            let modules_list = vec![
+                ("firmware", cfg.modules.firmware),
+                ("electronics", cfg.modules.electronics),
+                ("mechanical", cfg.modules.mechanical),
+                ("documentation", cfg.modules.documentation),
+                ("manufacturing", cfg.modules.manufacturing),
+            ];
+
+            for (module_name, is_active) in modules_list {
+                if is_active {
+                    let mut resolved = false;
+                    if let Some(ref links) = cfg.links {
+                        if let Some(link) = links.get(module_name) {
+                            active_modules.push((module_name.to_string(), std::path::PathBuf::from(&link.path), link.engine.clone()));
+                            resolved = true;
+                        }
+                    }
+                    if !resolved {
+                        let local_path = project_dir.join(module_name);
+                        if local_path.exists() && local_path.is_dir() {
+                            let default_engine = if module_name == "electronics" { "semantic-cad".to_string() } else { "file-hash".to_string() };
+                            active_modules.push((module_name.to_string(), local_path, default_engine));
+                        }
+                    }
+                }
             }
         }
     }
@@ -862,12 +886,43 @@ pub fn run_auth_login(project_dir: std::path::PathBuf, token: &str) -> std::resu
 }
 
 pub fn get_latest_design_json(project_dir: &std::path::Path) -> std::result::Result<(String, Option<String>), String> {
-    let cache_electronics = project_dir.join(".ito").join("cache").join("electronics");
-    let target_dir = if cache_electronics.exists() {
-        cache_electronics
-    } else {
-        project_dir.to_path_buf()
-    };
+    let mut target_dir = None;
+
+    // 1. Intentar resolver usando links en ito.json
+    let ito_json_path = project_dir.join("ito.json");
+    if ito_json_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&ito_json_path) {
+            if let Ok(config) = serde_json::from_str::<models::ItoProjectConfig>(&content) {
+                if let Some(links) = config.links {
+                    if let Some(link) = links.get("electronics") {
+                        let path = std::path::PathBuf::from(&link.path);
+                        if path.exists() {
+                            target_dir = Some(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Si no está en links, verificar si existe subcarpeta electronics en el raíz
+    if target_dir.is_none() {
+        let local_electronics = project_dir.join("electronics");
+        if local_electronics.exists() {
+            target_dir = Some(local_electronics);
+        }
+    }
+
+    // 3. Fallback a cache/electronics
+    if target_dir.is_none() {
+        let cache_electronics = project_dir.join(".ito").join("cache").join("electronics");
+        if cache_electronics.exists() {
+            target_dir = Some(cache_electronics);
+        }
+    }
+
+    // 4. Fallback final al raíz del proyecto
+    let target_dir = target_dir.unwrap_or_else(|| project_dir.to_path_buf());
 
     let design = parsers::parse_project_directory(&target_dir)
         .map_err(|e| format!("Error al parsear el diseño de hardware: {}", e))?;
