@@ -22,6 +22,16 @@ enum WorkspaceSubcommand {
 }
 
 #[derive(Subcommand)]
+enum AuthSubcommand {
+    /// Inicia sesión con un token de API de ITO
+    Login {
+        /// Token de API obtenido desde la web de Alexandria/ITOGravity
+        #[arg(long)]
+        token: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Inicializa un repositorio de Ito en el directorio actual
     Init,
@@ -46,6 +56,10 @@ enum Commands {
         /// Forzar el commit omitiendo errores críticos del linter
         #[arg(long)]
         force: bool,
+
+        /// Envía automáticamente el commit al servidor remoto tras crearlo localmente
+        #[arg(long)]
+        push: bool,
     },
     /// Muestra el historial completo de revisiones locales de hardware
     Log,
@@ -81,6 +95,15 @@ enum Commands {
         /// Opcional: Nombre del módulo a navegar
         module: Option<String>,
     },
+    /// Autentica el cliente ITO con el servidor
+    Auth {
+        #[command(subcommand)]
+        subcommand: AuthSubcommand,
+    },
+    /// Envía la última versión local del proyecto al servidor remoto
+    Push,
+    /// Descarga la última versión registrada del proyecto desde el servidor remoto
+    Pull,
 }
 
 #[tokio::main]
@@ -108,6 +131,7 @@ async fn main() -> Result<()> {
                 let default_config = Config {
                     project_id: project_name,
                     remote_url: "https://api.alexandria-hq.com/v1/reports".to_string(),
+                    token: None,
                 };
 
                 let toml_str = toml::to_string_pretty(&default_config)?;
@@ -458,7 +482,7 @@ async fn main() -> Result<()> {
             println!("");
             println!("Note: Si estás de acuerdo con estos cambios, puedes guardarlos localmente con: {}", "ito commit -m \"Mensaje\"".cyan());
         }
-        Commands::Commit { message, force } => {
+        Commands::Commit { message, force, push } => {
             let current_dir = std::env::current_dir()?;
             let project_root = ito::find_project_root(&current_dir).unwrap_or(current_dir.clone());
             let mut electronics_path = current_dir.clone();
@@ -495,7 +519,7 @@ async fn main() -> Result<()> {
                 }
             }
 
-            match ito::run_commit(project_root, message.clone()) {
+            match ito::run_commit(project_root.clone(), message.clone()) {
                 Ok(commit) => {
                     use colored::Colorize;
                     println!("{}", "Respaldo de diseño guardado localmente con éxito.".green().bold());
@@ -528,6 +552,18 @@ async fn main() -> Result<()> {
                         );
                     }
                     println!("\nNote: Puedes ver el historial de versiones con: {}", "ito log".cyan());
+
+                    if *push {
+                        println!("\nIniciando push automático al servidor...");
+                        match ito::run_push(project_root.clone()).await {
+                            Ok(msg) => {
+                                println!("{} Sincronización exitosa: {}", "OK".green().bold(), msg);
+                            }
+                            Err(e) => {
+                                println!("{} Error al subir versión al servidor: {}", "ERROR".red().bold(), e);
+                            }
+                        }
+                    }
                 }
                 Err(err_msg) => {
                     if err_msg.contains("No hay cambios pendientes") {
@@ -1167,6 +1203,46 @@ async fn main() -> Result<()> {
             } else {
                 println!("\nEl módulo {} no está vinculado todavía.", target_name.red().bold());
                 println!("Note: Vincúlalo primero con: {}", format!("ito link").cyan());
+            }
+        }
+        Commands::Auth { subcommand } => {
+            match subcommand {
+                AuthSubcommand::Login { token } => {
+                    let current_dir = std::env::current_dir()?;
+                    let project_root = ito::find_project_root(&current_dir).unwrap_or(current_dir.clone());
+                    match ito::run_auth_login(project_root, token) {
+                        Ok(_) => {
+                            println!("{}", "Autenticación exitosa. El token ha sido guardado para este proyecto.".green().bold());
+                        }
+                        Err(e) => {
+                            anyhow::bail!("{}", e);
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Push => {
+            let current_dir = std::env::current_dir()?;
+            let project_root = ito::find_project_root(&current_dir).unwrap_or(current_dir.clone());
+            match ito::run_push(project_root).await {
+                Ok(msg) => {
+                    println!("{} Sincronización exitosa: {}", "OK".green().bold(), msg);
+                }
+                Err(e) => {
+                    anyhow::bail!("{}", e);
+                }
+            }
+        }
+        Commands::Pull => {
+            let current_dir = std::env::current_dir()?;
+            let project_root = ito::find_project_root(&current_dir).unwrap_or(current_dir.clone());
+            match ito::run_pull(project_root).await {
+                Ok(msg) => {
+                    println!("{} Descarga y restauración exitosa: {}", "OK".green().bold(), msg);
+                }
+                Err(e) => {
+                    anyhow::bail!("{}", e);
+                }
             }
         }
     }

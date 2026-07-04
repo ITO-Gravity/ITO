@@ -12,6 +12,8 @@ use sha2::{Sha256, Digest};
 pub struct Config {
     pub project_id: String,
     pub remote_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
@@ -824,6 +826,305 @@ pub fn install_shell_wrappers() -> std::result::Result<(), String> {
     }
 
     Ok(())
+}
+
+pub fn run_auth_login(project_dir: std::path::PathBuf, token: &str) -> std::result::Result<(), String> {
+    let ito_dir = project_dir.join(".ito");
+    if !ito_dir.exists() {
+        return Err("No se encontró el directorio .ito. ¿Inicializaste el proyecto con 'ito init' o 'ito new'?".to_string());
+    }
+
+    let config_path = ito_dir.join("config.toml");
+    let mut config = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("Error al leer configuración: {}", e))?;
+        toml::from_str::<Config>(&content)
+            .map_err(|e| format!("Error al parsear configuración: {}", e))?
+    } else {
+        Config {
+            project_id: project_dir.file_name().unwrap_or_default().to_string_lossy().to_string(),
+            remote_url: "https://api.alexandria-hq.com/v1/reports".to_string(),
+            token: None,
+        }
+    };
+
+    config.token = Some(token.to_string());
+    if token.starts_with("ito_tk_") {
+        config.remote_url = "https://itogravity.com/php/ito_api.php".to_string();
+    }
+
+    let toml_str = toml::to_string_pretty(&config)
+        .map_err(|e| format!("Error al serializar configuración: {}", e))?;
+    std::fs::write(&config_path, toml_str)
+        .map_err(|e| format!("Error al escribir configuración: {}", e))?;
+
+    Ok(())
+}
+
+pub fn get_latest_design_json(project_dir: &std::path::Path) -> std::result::Result<(String, Option<String>), String> {
+    let cache_electronics = project_dir.join(".ito").join("cache").join("electronics");
+    let target_dir = if cache_electronics.exists() {
+        cache_electronics
+    } else {
+        project_dir.to_path_buf()
+    };
+
+    let design = parsers::parse_project_directory(&target_dir)
+        .map_err(|e| format!("Error al parsear el diseño de hardware: {}", e))?;
+
+    let design_json = serde_json::to_string(&design)
+        .map_err(|e| format!("Error al serializar el diseño a JSON: {}", e))?;
+
+    let mut bom_csv = None;
+    if let Ok(entries) = std::fs::read_dir(&target_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                    if ext.to_lowercase() == "csv" && path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase().contains("bom") {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            bom_csv = Some(content);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((design_json, bom_csv))
+}
+
+pub async fn run_push(project_dir: std::path::PathBuf) -> std::result::Result<String, String> {
+    let ito_dir = project_dir.join(".ito");
+    let config_path = ito_dir.join("config.toml");
+    if !config_path.exists() {
+        return Err("No se encontró el archivo de configuración. Inicializá el proyecto con 'ito init' o 'ito new'.".to_string());
+    }
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Error al leer configuración: {}", e))?;
+    let config: Config = toml::from_str(&content)
+        .map_err(|e| format!("Error al parsear configuración: {}", e))?;
+
+    let token = config.token.ok_or_else(|| "No estás autenticado. Ejecutá: ito auth login --token <TOKEN>".to_string())?;
+
+    let history_path = ito_dir.join("history.toml");
+    if !history_path.exists() {
+        return Err("No hay historial local de commits. Ejecutá 'ito commit' primero.".to_string());
+    }
+    let hist_content = std::fs::read_to_string(&history_path)
+        .map_err(|e| format!("Error al leer historial: {}", e))?;
+    let history: History = toml::from_str(&hist_content)
+        .map_err(|e| format!("Error al parsear historial: {}", e))?;
+
+    let latest_commit = history.commits.last()
+        .ok_or_else(|| "No hay commits locales para enviar. Ejecutá 'ito commit' primero.".to_string())?;
+
+    let (design_json, bom_csv) = get_latest_design_json(&project_dir)?;
+
+    let client = reqwest::Client::new();
+    
+    let mut form = reqwest::multipart::Form::new()
+        .text("project_id", config.project_id.clone())
+        .text("domain", "hardware")
+        .text("version_hash", latest_commit.hash.clone())
+        .text("parent_hash", latest_commit.parent_hash.clone())
+        .text("message", latest_commit.message.clone())
+        .text("token", token.clone());
+
+    let design_part = reqwest::multipart::Part::text(design_json)
+        .file_name("design.json")
+        .mime_str("application/json")
+        .map_err(|e| format!("Error al preparar archivo de diseño: {}", e))?;
+    form = form.part("design_json", design_part);
+
+    if let Some(bom) = bom_csv {
+        let bom_part = reqwest::multipart::Part::text(bom)
+            .file_name("bom.csv")
+            .mime_str("text/csv")
+            .map_err(|e| format!("Error al preparar archivo BOM: {}", e))?;
+        form = form.part("bom_csv", bom_part);
+    }
+
+    println!("Subiendo versión {} a {}...", &latest_commit.hash[..8], &config.remote_url);
+    let response = client.post(&config.remote_url)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Error de conexión con el servidor: {}", e))?;
+
+    let status = response.status();
+    let body = response.text().await
+        .map_err(|e| format!("Error al leer respuesta del servidor: {}", e))?;
+
+    if status.is_success() {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(msg) = json.get("message").and_then(|m| m.as_str()) {
+                return Ok(msg.to_string());
+            }
+        }
+        Ok("Versión sincronizada exitosamente con el servidor.".to_string())
+    } else {
+        let mut err_msg = format!("El servidor respondió con código {}", status);
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(msg) = json.get("message").and_then(|m| m.as_str()) {
+                err_msg = msg.to_string();
+            }
+        }
+        Err(err_msg)
+    }
+}
+
+pub async fn run_pull(project_dir: std::path::PathBuf) -> std::result::Result<String, String> {
+    let ito_dir = project_dir.join(".ito");
+    let config_path = ito_dir.join("config.toml");
+    if !config_path.exists() {
+        return Err("No se encontró el archivo de configuración. Inicializá el proyecto con 'ito init' o 'ito new'.".to_string());
+    }
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Error al leer configuración: {}", e))?;
+    let config: Config = toml::from_str(&content)
+        .map_err(|e| format!("Error al parsear configuración: {}", e))?;
+
+    let token = config.token.ok_or_else(|| "No estás autenticado. Ejecutá: ito auth login --token <TOKEN>".to_string())?;
+
+    let client = reqwest::Client::new();
+    let mut params = std::collections::HashMap::new();
+    params.insert("action", "pull");
+    params.insert("project_id", &config.project_id);
+    params.insert("token", &token);
+
+    println!("Consultando última versión en {}...", &config.remote_url);
+    let response = client.post(&config.remote_url)
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("Error de conexión con el servidor: {}", e))?;
+
+    let status = response.status();
+    let body = response.text().await
+        .map_err(|e| format!("Error al leer respuesta del servidor: {}", e))?;
+
+    if !status.is_success() {
+        let mut err_msg = format!("El servidor respondió con código {}", status);
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(msg) = json.get("message").and_then(|m| m.as_str()) {
+                err_msg = msg.to_string();
+            }
+        }
+        return Err(err_msg);
+    }
+
+    let json_resp: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("Error al decodificar respuesta JSON: {}", e))?;
+
+    let version_hash = json_resp.get("version_hash").and_then(|h| h.as_str())
+        .ok_or_else(|| "El servidor no retornó un hash de versión válido.".to_string())?;
+    
+    let parent_hash = json_resp.get("parent_hash").and_then(|h| h.as_str()).unwrap_or("");
+    let message = json_resp.get("message").and_then(|m| m.as_str()).unwrap_or("Sincronización remota");
+    
+    let history_path = ito_dir.join("history.toml");
+    let mut history = if history_path.exists() {
+        let hist_content = std::fs::read_to_string(&history_path)
+            .map_err(|e| format!("Error al leer historial: {}", e))?;
+        toml::from_str::<History>(&hist_content).unwrap_or_default()
+    } else {
+        History::default()
+    };
+
+    if let Some(latest_local) = history.commits.last() {
+        if latest_local.hash == version_hash {
+            return Ok(format!("Ya estás actualizado a la última versión del servidor ({}).", &version_hash[..8]));
+        }
+    }
+
+    let mut electronics_path = project_dir.clone();
+    let ito_json_path = project_dir.join("ito.json");
+    if ito_json_path.exists() {
+        if let Ok(c) = std::fs::read_to_string(&ito_json_path) {
+            if let Ok(cfg) = serde_json::from_str::<models::ItoProjectConfig>(&c) {
+                if let Some(links) = cfg.links {
+                    if let Some(link) = links.get("electronics") {
+                        electronics_path = std::path::PathBuf::from(&link.path);
+                    }
+                }
+            }
+        }
+    }
+
+    let design_json_val = json_resp.get("design_json");
+    let bom_csv_val = json_resp.get("bom_csv");
+
+    let cache_dir = ito_dir.join("cache").join("electronics");
+    std::fs::create_dir_all(&cache_dir).ok();
+    std::fs::create_dir_all(&electronics_path).ok();
+
+    if let Some(design_obj) = design_json_val {
+        if !design_obj.is_null() {
+            let design_str = serde_json::to_string_pretty(design_obj).unwrap_or_default();
+            std::fs::write(electronics_path.join("design.json"), &design_str).ok();
+            std::fs::write(cache_dir.join("design.json"), &design_str).ok();
+        }
+    }
+
+    if let Some(bom_obj) = bom_csv_val {
+        if let Some(bom_str) = bom_obj.as_str() {
+            std::fs::write(electronics_path.join("bom.csv"), bom_str).ok();
+            std::fs::write(cache_dir.join("bom.csv"), bom_str).ok();
+        }
+    }
+
+    let mut manifest_hashes = std::collections::HashMap::new();
+    if electronics_path.join("design.json").exists() {
+        if let Ok(h) = cas::calculate_file_hash(&electronics_path.join("design.json")) {
+            manifest_hashes.insert("design.json".to_string(), h);
+        }
+    }
+    if electronics_path.join("bom.csv").exists() {
+        if let Ok(h) = cas::calculate_file_hash(&electronics_path.join("bom.csv")) {
+            manifest_hashes.insert("bom.csv".to_string(), h);
+        }
+    }
+    let manifest_str = serde_json::to_string_pretty(&manifest_hashes).unwrap_or_default();
+    std::fs::write(cache_dir.join("manifest.json"), &manifest_str).ok();
+
+    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    
+    let mut diff_summary = None;
+    if let Some(design_obj) = design_json_val {
+        if !design_obj.is_null() {
+            if let Ok(new_design) = serde_json::from_value::<models::HardwareDesign>(design_obj.clone()) {
+                diff_summary = Some(DiffSummary {
+                    added_components: new_design.components.len(),
+                    deleted_components: 0,
+                    modified_components: 0,
+                    added_nets: new_design.nets.len(),
+                    deleted_nets: 0,
+                    modified_nets: 0,
+                });
+            }
+        }
+    }
+
+    let commit_entry = CommitEntry {
+        hash: version_hash.to_string(),
+        parent_hash: parent_hash.to_string(),
+        message: message.to_string(),
+        timestamp,
+        zip_path: format!(".ito/backups/{}", version_hash),
+        synced: true,
+        diff_summary,
+        modules: std::collections::HashMap::new(),
+    };
+
+    history.commits.push(commit_entry);
+    let history_str = toml::to_string_pretty(&history)
+        .map_err(|e| format!("Error al serializar historial: {}", e))?;
+    std::fs::write(&history_path, history_str)
+        .map_err(|e| format!("Error al escribir historial: {}", e))?;
+
+    Ok(format!("Descargada e integrada versión {} ({})", &version_hash[..8], message))
 }
 
 #[cfg(test)]
