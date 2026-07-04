@@ -925,7 +925,7 @@ pub fn get_latest_design_json(project_dir: &std::path::Path) -> std::result::Res
     let target_dir = target_dir.unwrap_or_else(|| project_dir.to_path_buf());
 
     let design = parsers::parse_project_directory(&target_dir)
-        .map_err(|e| format!("Error al parsear el diseño de hardware: {}", e))?;
+        .unwrap_or_else(|_| models::HardwareDesign::new());
 
     let design_json = serde_json::to_string(&design)
         .map_err(|e| format!("Error al serializar el diseño a JSON: {}", e))?;
