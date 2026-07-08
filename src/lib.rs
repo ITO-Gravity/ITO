@@ -318,13 +318,20 @@ pub fn run_new(cwd: std::path::PathBuf, project_name: &str) -> Result<(std::path
     ];
 
     for sub_dir in &dirs_to_create {
-        let path = if sub_dir.is_empty() {
-            project_dir.clone()
-        } else {
-            project_dir.join(sub_dir)
-        };
+        if sub_dir.is_empty() {
+            continue;
+        }
+        let path = project_dir.join(sub_dir);
         std::fs::create_dir_all(&path)
             .map_err(|e| format!("Error al crear el directorio '{}': {}", path.display(), e))?;
+
+        // Agregar archivo .gitkeep en las subcarpetas del proyecto (excepto .ito y sus subcarpetas)
+        if !sub_dir.starts_with(".ito") {
+            let keep_path = path.join(".gitkeep");
+            if !keep_path.exists() {
+                let _ = std::fs::write(&keep_path, "# Mantenido vacío por ITO\n");
+            }
+        }
     }
 
     // 3. Generar archivo ito.json
@@ -952,6 +959,31 @@ pub fn get_latest_design_json(project_dir: &std::path::Path) -> std::result::Res
 
 pub fn create_project_zip(project_dir: &std::path::Path) -> std::result::Result<Vec<u8>, String> {
     use std::io::Write;
+
+    // Asegurar que las carpetas estándar vacías tengan un archivo .gitkeep para que se suban y se muestren en la web
+    let standard_dirs = [
+        "firmware",
+        "electronics",
+        "electronics/pcb",
+        "electronics/schematics",
+        "electronics/libraries",
+        "mechanical",
+        "mechanical/cad",
+        "mechanical/drawings",
+        "documentation",
+        "manufacturing",
+    ];
+    for sub_dir in &standard_dirs {
+        let path = project_dir.join(sub_dir);
+        if path.exists() && path.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                if entries.flatten().count() == 0 {
+                    let keep_path = path.join(".gitkeep");
+                    let _ = std::fs::write(&keep_path, "# Mantenido vacío por ITO\n");
+                }
+            }
+        }
+    }
 
     let mut links = std::collections::HashMap::new();
     let ito_json_path = project_dir.join("ito.json");
