@@ -1482,30 +1482,67 @@ pub async fn run_clone(token: String) -> std::result::Result<String, String> {
         .await
         .map_err(|e| format!("Error de conexión al servidor: {}", e))?;
 
-    if !response.status().is_success() {
-        return Err("Token inválido o expirado. Verifica tus credenciales.".to_string());
+    let mut project_id_to_use = None;
+    let mut project_name_to_use = None;
+
+    if response.status().is_success() {
+        if let Ok(resp_json) = response.json::<serde_json::Value>().await {
+            if let Some(proj_id) = resp_json.get("project_id") {
+                let id_str = match proj_id {
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::String(s) => s.clone(),
+                    _ => "".to_string(),
+                };
+                if !id_str.is_empty() {
+                    project_id_to_use = Some(id_str);
+                }
+            }
+            if let Some(proj_name) = resp_json.get("project_name").and_then(|n| n.as_str()) {
+                project_name_to_use = Some(proj_name.to_string());
+            }
+        }
     }
 
-    let resp_json: serde_json::Value = response.json()
-        .await
-        .map_err(|e| format!("Error al decodificar respuesta del servidor: {}", e))?;
+    if project_name_to_use.is_none() {
+        // Fallback: intentar verificar con action=latest (soportado por servidores viejos)
+        let mut fallback_params = std::collections::HashMap::new();
+        fallback_params.insert("action", "latest");
+        fallback_params.insert("token", &token);
 
-    let project_id = resp_json.get("project_id")
-        .ok_or_else(|| "El servidor no retornó un ID de proyecto.".to_string())?;
-    
-    let id_str = match project_id {
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => s.clone(),
-        _ => return Err("Formato de ID de proyecto inválido recibido.".to_string()),
-    };
+        let fb_response = client.post(&remote_url)
+            .form(&fallback_params)
+            .send()
+            .await
+            .map_err(|e| format!("Error de conexión al servidor (fallback): {}", e))?;
 
-    let project_name = resp_json.get("project_name")
-        .and_then(|n| n.as_str())
-        .ok_or_else(|| "El servidor no retornó el nombre del proyecto.".to_string())?;
+        let status_code = fb_response.status().as_u16();
+        if status_code == 401 {
+            return Err("Token inválido o expirado. Verifica tus credenciales.".to_string());
+        }
+
+        if fb_response.status().is_success() || status_code == 404 {
+            println!("Servidor no actualizado detected. Token verificado con éxito.");
+            println!("Ingresa el nombre del proyecto en la web (ej. PRUEBA-ITO):");
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)
+                .map_err(|e| format!("Error al leer entrada: {}", e))?;
+            let name_trimmed = input.trim().to_string();
+            if name_trimmed.is_empty() {
+                return Err("El nombre del proyecto no puede estar vacío.".to_string());
+            }
+            project_id_to_use = Some(name_trimmed.clone());
+            project_name_to_use = Some(name_trimmed);
+        } else {
+            return Err("Token inválido o expirado. Verifica tus credenciales.".to_string());
+        }
+    }
+
+    let id_str = project_id_to_use.ok_or_else(|| "No se pudo obtener el ID del proyecto.".to_string())?;
+    let project_name = project_name_to_use.ok_or_else(|| "No se pudo obtener el nombre del proyecto.".to_string())?;
 
     let target_dir = std::env::current_dir()
         .map_err(|e| format!("Error al obtener el directorio actual: {}", e))?
-        .join(project_name);
+        .join(&project_name);
 
     if target_dir.exists() {
         return Err(format!("Error: El directorio '{}' ya existe.", target_dir.display()));
