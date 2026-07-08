@@ -1463,6 +1463,112 @@ pub async fn run_pull(project_dir: std::path::PathBuf) -> std::result::Result<St
     Ok(format!("Descargada e integrada versión {} ({})", &version_hash[..8], message))
 }
 
+pub async fn run_clone(token: String) -> std::result::Result<String, String> {
+    let remote_url = if token.starts_with("ito_tk_") {
+        "https://itogravity.com/php/ito_api.php".to_string()
+    } else {
+        "https://api.alexandria-hq.com/v1/reports".to_string()
+    };
+
+    let client = reqwest::Client::new();
+    let mut params = std::collections::HashMap::new();
+    params.insert("action", "info");
+    params.insert("token", &token);
+
+    println!("Conectando con el servidor para verificar el token...");
+    let response = client.post(&remote_url)
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("Error de conexión al servidor: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err("Token inválido o expirado. Verifica tus credenciales.".to_string());
+    }
+
+    let resp_json: serde_json::Value = response.json()
+        .await
+        .map_err(|e| format!("Error al decodificar respuesta del servidor: {}", e))?;
+
+    let project_id = resp_json.get("project_id")
+        .ok_or_else(|| "El servidor no retornó un ID de proyecto.".to_string())?;
+    
+    let id_str = match project_id {
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        _ => return Err("Formato de ID de proyecto inválido recibido.".to_string()),
+    };
+
+    let project_name = resp_json.get("project_name")
+        .and_then(|n| n.as_str())
+        .ok_or_else(|| "El servidor no retornó el nombre del proyecto.".to_string())?;
+
+    let target_dir = std::env::current_dir()
+        .map_err(|e| format!("Error al obtener el directorio actual: {}", e))?
+        .join(project_name);
+
+    if target_dir.exists() {
+        return Err(format!("Error: El directorio '{}' ya existe.", target_dir.display()));
+    }
+
+    println!("Creando directorio del proyecto '{}'...", project_name);
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("Error al crear el directorio del proyecto: {}", e))?;
+
+    let ito_dir = target_dir.join(".ito");
+    std::fs::create_dir_all(&ito_dir)
+        .map_err(|e| format!("Error al crear el directorio .ito: {}", e))?;
+
+    // Crear config.toml
+    let config = Config {
+        project_id: id_str.clone(),
+        remote_url: remote_url.clone(),
+        token: Some(token.clone()),
+    };
+    let toml_str = toml::to_string_pretty(&config)
+        .map_err(|e| format!("Error al serializar configuración: {}", e))?;
+    std::fs::write(ito_dir.join("config.toml"), toml_str)
+        .map_err(|e| format!("Error al escribir configuración: {}", e))?;
+
+    // Crear el ito.json por defecto
+    let ito_json_path = target_dir.join("ito.json");
+    let ito_config = models::ItoProjectConfig {
+        format_version: "1.0".to_string(),
+        project_name: project_name.to_string(),
+        project_uuid: uuid::Uuid::new_v4().to_string(),
+        created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        created_by: "ITO CLI".to_string(),
+        modules: models::ItoProjectModules {
+            firmware: true,
+            electronics: true,
+            mechanical: true,
+            documentation: true,
+            manufacturing: true,
+        },
+        current_revision: "REV-0001".to_string(),
+        license: "MIT".to_string(),
+        version: "0.1.0".to_string(),
+        links: None,
+    };
+    let c_json = serde_json::to_string_pretty(&ito_config)
+        .map_err(|e| format!("Error al serializar ito.json: {}", e))?;
+    std::fs::write(&ito_json_path, c_json)
+        .map_err(|e| format!("Error al escribir ito.json: {}", e))?;
+
+    println!("Descargando versión completa desde el servidor...");
+    // Ejecutar run_pull
+    match run_pull(target_dir.clone()).await {
+        Ok(msg) => {
+            Ok(format!("Proyecto '{}' clonado con éxito en: {}\n{}", project_name, target_dir.display(), msg))
+        }
+        Err(e) => {
+            // Limpiar carpeta en caso de error para no dejar residuos
+            let _ = std::fs::remove_dir_all(&target_dir);
+            Err(format!("Error al descargar archivos del proyecto: {}", e))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

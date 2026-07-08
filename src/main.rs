@@ -104,6 +104,11 @@ enum Commands {
     Push,
     /// Descarga la última versión registrada del proyecto desde el servidor remoto
     Pull,
+    /// Clona un proyecto existente desde el servidor remoto usando su Token de API
+    Clone {
+        /// Token de API del proyecto obtenido de la web de ITOGravity
+        token: String,
+    },
 }
 
 #[tokio::main]
@@ -1239,6 +1244,16 @@ async fn main() -> Result<()> {
             match ito::run_pull(project_root).await {
                 Ok(msg) => {
                     println!("{} Descarga y restauración exitosa: {}", "OK".green().bold(), msg);
+                }
+                Err(e) => {
+                    anyhow::bail!("{}", e);
+                }
+            }
+        }
+        Commands::Clone { token } => {
+            match ito::run_clone(token.clone()).await {
+                Ok(msg) => {
+                    println!("{} {}", "OK".green().bold(), msg);
                 }
                 Err(e) => {
                     anyhow::bail!("{}", e);
