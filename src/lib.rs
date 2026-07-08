@@ -884,6 +884,108 @@ pub fn run_auth_login(project_dir: std::path::PathBuf, token: &str) -> std::resu
         config.remote_url = "https://itogravity.com/php/ito_api.php".to_string();
     }
 
+    // Si es itogravity, validar y obtener project_id y project_name reales
+    if config.remote_url.contains("itogravity.com") {
+        let client = reqwest::blocking::Client::new();
+        let mut params = std::collections::HashMap::new();
+        params.insert("action", "info");
+        params.insert("token", token);
+
+        println!("Conectando con ITOGravity para validar credenciales...");
+        let response = client.post(&config.remote_url)
+            .form(&params)
+            .send()
+            .map_err(|e| format!("Error de conexión al servidor: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err("Token inválido o expirado. Verifica tus credenciales.".to_string());
+        }
+
+        let resp_json: serde_json::Value = response.json()
+            .map_err(|e| format!("Error al decodificar respuesta del servidor: {}", e))?;
+
+        if let Some(proj_id) = resp_json.get("project_id") {
+            let id_str = match proj_id {
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::String(s) => s.clone(),
+                _ => return Err("Formato de ID de proyecto inválido recibido.".to_string()),
+            };
+            config.project_id = id_str;
+        }
+
+        // Crear/Actualizar ito.json para asegurar congruencia del proyecto local
+        let ito_json_path = project_dir.join("ito.json");
+        let project_name = resp_json.get("project_name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("Proyecto Sincronizado");
+
+        let mut ito_config = if ito_json_path.exists() {
+            if let Ok(c) = std::fs::read_to_string(&ito_json_path) {
+                serde_json::from_str::<models::ItoProjectConfig>(&c).unwrap_or_else(|_| models::ItoProjectConfig {
+                    format_version: "1.0".to_string(),
+                    project_name: project_name.to_string(),
+                    project_uuid: uuid::Uuid::new_v4().to_string(),
+                    created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    created_by: "ITO CLI".to_string(),
+                    modules: models::ItoProjectModules {
+                        firmware: true,
+                        electronics: true,
+                        mechanical: true,
+                        documentation: true,
+                        manufacturing: true,
+                    },
+                    current_revision: "REV-0001".to_string(),
+                    license: "MIT".to_string(),
+                    version: "0.1.0".to_string(),
+                    links: None,
+                })
+            } else {
+                models::ItoProjectConfig {
+                    format_version: "1.0".to_string(),
+                    project_name: project_name.to_string(),
+                    project_uuid: uuid::Uuid::new_v4().to_string(),
+                    created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    created_by: "ITO CLI".to_string(),
+                    modules: models::ItoProjectModules {
+                        firmware: true,
+                        electronics: true,
+                        mechanical: true,
+                        documentation: true,
+                        manufacturing: true,
+                    },
+                    current_revision: "REV-0001".to_string(),
+                    license: "MIT".to_string(),
+                    version: "0.1.0".to_string(),
+                    links: None,
+                }
+            }
+        } else {
+            models::ItoProjectConfig {
+                format_version: "1.0".to_string(),
+                project_name: project_name.to_string(),
+                project_uuid: uuid::Uuid::new_v4().to_string(),
+                created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                created_by: "ITO CLI".to_string(),
+                modules: models::ItoProjectModules {
+                    firmware: true,
+                    electronics: true,
+                    mechanical: true,
+                    documentation: true,
+                    manufacturing: true,
+                },
+                current_revision: "REV-0001".to_string(),
+                license: "MIT".to_string(),
+                version: "0.1.0".to_string(),
+                links: None,
+            }
+        };
+
+        ito_config.project_name = project_name.to_string();
+        if let Ok(c_json) = serde_json::to_string_pretty(&ito_config) {
+            let _ = std::fs::write(&ito_json_path, c_json);
+        }
+    }
+
     let toml_str = toml::to_string_pretty(&config)
         .map_err(|e| format!("Error al serializar configuración: {}", e))?;
     std::fs::write(&config_path, toml_str)
