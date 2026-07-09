@@ -109,6 +109,8 @@ enum Commands {
         /// Token de API del proyecto obtenido de la web de ITOGravity
         token: String,
     },
+    /// Inicia el asistente interactivo para guiar al operador paso a paso (alias de select)
+    Guia,
 }
 
 #[tokio::main]
@@ -892,7 +894,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Select => {
+        Commands::Select | Commands::Guia => {
             use std::io::{self, Write};
             use colored::Colorize;
 
