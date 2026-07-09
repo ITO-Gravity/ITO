@@ -301,7 +301,7 @@ pub async fn download_and_install_update(target_version: &str) -> Result<()> {
         anyhow::bail!("Fallo al establecer el nuevo binario ejecutable: {}", e);
     }
 
-    println!("¡ITO se ha actualizado correctamente a la versión v{}!", target_version);
+    println!("¡ITO se ha actualizado correctamente a la versión v{}!", target_version.trim_start_matches('v'));
     Ok(())
 }
 
@@ -313,7 +313,7 @@ pub async fn check_and_update_background() {
 
     match check_for_updates(false).await {
         Ok(Some(new_version)) => {
-            println!("¡Nueva versión de ITO detectada (v{})! Actualizando automáticamente...", new_version);
+            println!("¡Nueva versión de ITO detectada (v{})! Actualizando automáticamente...", new_version.trim_start_matches('v'));
             if let Err(e) = download_and_install_update(&new_version).await {
                 eprintln!("Advertencia: Error al actualizar ITO automáticamente: {}", e);
             }

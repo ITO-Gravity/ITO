@@ -1580,7 +1580,7 @@ async fn main() -> Result<()> {
             println!("Comprobando actualizaciones en GitHub...");
             match ito::updater::check_for_updates(*force).await {
                 Ok(Some(new_version)) => {
-                    println!("Actualización disponible: v{}.", new_version);
+                    println!("Actualización disponible: v{}.", new_version.trim_start_matches('v'));
                     if let Err(e) = ito::updater::download_and_install_update(&new_version).await {
                         anyhow::bail!("Error al instalar la actualización: {}", e);
                     }
