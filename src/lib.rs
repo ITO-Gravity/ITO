@@ -481,9 +481,11 @@ pub fn load_workspace_config() -> Result<Option<models::ItoWorkspaceConfig>, Str
 }
 
 pub fn save_workspace_config(workspace_path: &std::path::Path) -> Result<(), String> {
+    let existing_token = load_workspace_config().ok().flatten().and_then(|c| c.token);
     let config = models::ItoWorkspaceConfig {
         workspace: workspace_path.to_string_lossy().to_string(),
         version: "1.0".to_string(),
+        token: existing_token,
     };
     let config_str = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Error al serializar configuración de workspace: {}", e))?;
@@ -859,6 +861,103 @@ pub fn install_shell_wrappers() -> std::result::Result<(), String> {
     Ok(())
 }
 
+pub fn resolve_token(config: &Config) -> std::result::Result<String, String> {
+    if let Some(ref t) = config.token {
+        if !t.trim().is_empty() {
+            return Ok(t.clone());
+        }
+    }
+    // Fallback al token global
+    if let Ok(Some(ws_cfg)) = load_workspace_config() {
+        if let Some(ref t) = ws_cfg.token {
+            if !t.trim().is_empty() {
+                return Ok(t.clone());
+            }
+        }
+    }
+    Err("No estás autenticado. Por favor inicia sesión con: ito login".to_string())
+}
+
+pub fn save_global_workspace_config(config: &models::ItoWorkspaceConfig) -> std::result::Result<(), String> {
+    let config_str = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("Error al serializar configuración: {}", e))?;
+
+    // Guardar en ~/.ito/config.json
+    let pointer_path = get_global_config_pointer_path()?;
+    if let Some(parent) = pointer_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Error al crear directorio global de configuración {}: {}", parent.display(), e))?;
+    }
+    std::fs::write(&pointer_path, &config_str)
+        .map_err(|e| format!("Error al escribir puntero de configuración en {}: {}", pointer_path.display(), e))?;
+
+    // Guardar en Workspace/Config/config.json si existe
+    let workspace_path = std::path::PathBuf::from(&config.workspace);
+    let local_config_path = workspace_path.join("Config").join("config.json");
+    if local_config_path.parent().map(|p| p.exists()).unwrap_or(false) {
+        let _ = std::fs::write(&local_config_path, &config_str);
+    }
+
+    Ok(())
+}
+
+pub async fn run_login(email: &str, password: &str) -> std::result::Result<String, String> {
+    let remote_url = "https://itogravity.com/php/ito_api.php".to_string();
+
+    let client = reqwest::Client::new();
+    let mut params = std::collections::HashMap::new();
+    params.insert("action", "login");
+    params.insert("email", email);
+    params.insert("password", password);
+
+    println!("Conectando con el servidor para iniciar sesión...");
+    let response = client.post(&remote_url)
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("Error de conexión al servidor: {}", e))?;
+
+    if !response.status().is_success() {
+        // Intentar decodificar mensaje de error del servidor
+        if let Ok(resp_json) = response.json::<serde_json::Value>().await {
+            if let Some(msg) = resp_json.get("message").and_then(|m| m.as_str()) {
+                return Err(msg.to_string());
+            }
+        }
+        return Err("Inicio de sesión fallido. Verifica tus credenciales.".to_string());
+    }
+
+    let resp_json: serde_json::Value = response.json()
+        .await
+        .map_err(|e| format!("Error al decodificar respuesta del servidor: {}", e))?;
+
+    let token = resp_json.get("token")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| "El servidor no retornó un token de sesión.".to_string())?;
+
+    let operator_name = resp_json.get("operator_name")
+        .and_then(|o| o.as_str())
+        .unwrap_or("Operador");
+
+    // Guardar token en la configuración global
+    let mut ws_config = match load_workspace_config()? {
+        Some(cfg) => cfg,
+        None => {
+            let default_ws = get_default_workspace_path()?;
+            models::ItoWorkspaceConfig {
+                workspace: default_ws.to_string_lossy().to_string(),
+                version: "1.0".to_string(),
+                token: None,
+            }
+        }
+    };
+
+    ws_config.token = Some(token.to_string());
+    save_global_workspace_config(&ws_config)?;
+
+    Ok(format!("Sesión iniciada con éxito. ¡Bienvenido, {}!", operator_name))
+}
+
 pub fn run_auth_login(project_dir: std::path::PathBuf, token: &str) -> std::result::Result<(), String> {
     let ito_dir = project_dir.join(".ito");
     if !ito_dir.exists() {
@@ -1180,7 +1279,7 @@ pub async fn run_push(project_dir: std::path::PathBuf) -> std::result::Result<St
     let config: Config = toml::from_str(&content)
         .map_err(|e| format!("Error al parsear configuración: {}", e))?;
 
-    let token = config.token.ok_or_else(|| "No estás autenticado. Ejecutá: ito auth login --token <TOKEN>".to_string())?;
+    let token = resolve_token(&config)?;
 
     let history_path = ito_dir.join("history.toml");
     if !history_path.exists() {
@@ -1269,7 +1368,7 @@ pub async fn run_pull(project_dir: std::path::PathBuf) -> std::result::Result<St
     let config: Config = toml::from_str(&content)
         .map_err(|e| format!("Error al parsear configuración: {}", e))?;
 
-    let token = config.token.ok_or_else(|| "No estás autenticado. Ejecutá: ito auth login --token <TOKEN>".to_string())?;
+    let token = resolve_token(&config)?;
 
     let client = reqwest::Client::new();
     let mut params = std::collections::HashMap::new();
@@ -1463,17 +1562,42 @@ pub async fn run_pull(project_dir: std::path::PathBuf) -> std::result::Result<St
     Ok(format!("Descargada e integrada versión {} ({})", &version_hash[..8], message))
 }
 
-pub async fn run_clone(token: String) -> std::result::Result<String, String> {
-    let remote_url = if token.starts_with("ito_tk_") {
-        "https://itogravity.com/php/ito_api.php".to_string()
+pub async fn run_clone(token_or_project: String) -> std::result::Result<String, String> {
+    // 1. Resolver token y project_id_input
+    let (token, project_id_input) = if token_or_project.starts_with("ito_tk_") {
+        // Es un token específico de proyecto (retrocompatibilidad)
+        (token_or_project.clone(), None)
     } else {
-        "https://api.alexandria-hq.com/v1/reports".to_string()
+        // Es un nombre/ID/URL de proyecto. Necesitamos el token global
+        let global_token = match load_workspace_config() {
+            Ok(Some(cfg)) => cfg.token.ok_or_else(|| "No estás autenticado. Ejecutá: ito login".to_string())?,
+            _ => return Err("No estás autenticado. Ejecutá: ito login".to_string()),
+        };
+        (global_token, Some(token_or_project.clone()))
     };
+
+    let clean_project_id = project_id_input.map(|input| {
+        let input_trimmed = input.trim();
+        if input_trimmed.starts_with("http://") || input_trimmed.starts_with("https://") {
+            if let Some(pos) = input_trimmed.rfind('/') {
+                input_trimmed[pos + 1..].to_string()
+            } else {
+                input_trimmed.to_string()
+            }
+        } else {
+            input_trimmed.to_string()
+        }
+    });
+
+    let remote_url = "https://itogravity.com/php/ito_api.php".to_string();
 
     let client = reqwest::Client::new();
     let mut params = std::collections::HashMap::new();
     params.insert("action", "info");
     params.insert("token", &token);
+    if let Some(ref pid) = clean_project_id {
+        params.insert("project_id", pid);
+    }
 
     println!("Conectando con el servidor para verificar el token...");
     let response = client.post(&remote_url)
@@ -1560,7 +1684,11 @@ pub async fn run_clone(token: String) -> std::result::Result<String, String> {
     let config = Config {
         project_id: id_str.clone(),
         remote_url: remote_url.clone(),
-        token: Some(token.clone()),
+        token: if token_or_project.starts_with("ito_tk_") {
+            Some(token.clone())
+        } else {
+            None
+        },
     };
     let toml_str = toml::to_string_pretty(&config)
         .map_err(|e| format!("Error al serializar configuración: {}", e))?;

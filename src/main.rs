@@ -104,13 +104,17 @@ enum Commands {
     Push,
     /// Descarga la última versión registrada del proyecto desde el servidor remoto
     Pull,
-    /// Clona un proyecto existente desde el servidor remoto usando su Token de API
+    /// Clona un proyecto existente desde el servidor remoto usando su Token de API o tu sesión global
     Clone {
-        /// Token de API del proyecto obtenido de la web de ITOGravity
-        token: String,
+        /// Token de API del proyecto, o ID/nombre/URL del proyecto si ya iniciaste sesión
+        token_or_project: String,
     },
     /// Inicia el asistente interactivo para guiar al operador paso a paso (alias de select)
     Guia,
+    /// Inicia sesión con tus credenciales de ITOGravity (Email y Contraseña)
+    Login,
+    /// Inicia sesión con tus credenciales de ITOGravity (Email y Contraseña)
+    Logueo,
 }
 
 #[tokio::main]
@@ -814,6 +818,7 @@ async fn main() -> Result<()> {
                     ito::models::ItoWorkspaceConfig {
                         workspace: chosen_path.to_string_lossy().to_string(),
                         version: "1.0".to_string(),
+                        token: None,
                     }
                 }
                 Err(err) => {
@@ -962,7 +967,7 @@ async fn main() -> Result<()> {
                         }
                         match choice.trim() {
                             "1" => {
-                                print!("Ingrese el Token API del proyecto en la web: ");
+                                print!("Ingrese el Token de API del proyecto, o su ID/nombre/URL (si ya inició sesión): ");
                                 io::stdout().flush().ok();
                                 let mut token_input = String::new();
                                 if io::stdin().read_line(&mut token_input).is_ok() {
@@ -1027,7 +1032,7 @@ async fn main() -> Result<()> {
                         continue 'main_select;
                     }
                     if selection_input.to_lowercase() == "c" {
-                        print!("Ingrese el Token API del proyecto en la web: ");
+                        print!("Ingrese el Token de API del proyecto, o su ID/nombre/URL (si ya inició sesión): ");
                         io::stdout().flush().ok();
                         let mut token_input = String::new();
                         if io::stdin().read_line(&mut token_input).is_ok() {
@@ -1515,8 +1520,43 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Clone { token } => {
-            match ito::run_clone(token.clone()).await {
+        Commands::Clone { token_or_project } => {
+            match ito::run_clone(token_or_project.clone()).await {
+                Ok(msg) => {
+                    println!("{} {}", "OK".green().bold(), msg);
+                }
+                Err(e) => {
+                    anyhow::bail!("{}", e);
+                }
+            }
+        }
+        Commands::Login | Commands::Logueo => {
+            use std::io::{self, Write};
+            use colored::Colorize;
+
+            println!("{}", "Inicio de Sesión en ITOGravity".bold());
+            print!("Correo Electrónico: ");
+            io::stdout().flush().ok();
+            let mut email = String::new();
+            if io::stdin().read_line(&mut email).is_err() {
+                anyhow::bail!("Error al leer el correo electrónico.");
+            }
+            let email = email.trim();
+
+            print!("Contraseña: ");
+            io::stdout().flush().ok();
+            
+            let password = match rpassword::read_password() {
+                Ok(p) => p,
+                Err(_) => anyhow::bail!("Error al leer la contraseña."),
+            };
+            let password = password.trim();
+
+            if email.is_empty() || password.is_empty() {
+                anyhow::bail!("El correo electrónico y la contraseña son obligatorios.");
+            }
+
+            match ito::run_login(email, password).await {
                 Ok(msg) => {
                     println!("{} {}", "OK".green().bold(), msg);
                 }
