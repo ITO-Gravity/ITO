@@ -1,6 +1,6 @@
 # ITO (糸) — Motor de Versionado Semántico y Almacenamiento CAS para Ingeniería de Hardware
 
-ITO es una herramienta de línea de comandos (CLI) de nivel industrial y de código abierto diseñada bajo la plataforma Alexandria HQ para la administración unificada del ciclo de vida y control de versiones en proyectos de ingeniería de hardware y sistemas embebidos.
+ITO es una herramienta de línea de comandos (CLI) de nivel industrial y de código abierto diseñada bajo la plataforma ITO Gravity para la administración unificada del ciclo de vida y control de versiones en proyectos de ingeniería de hardware y sistemas embebidos.
 
 A diferencia de los sistemas de control de versiones tradicionales como Git, que analizan diferencias por línea de texto plano y tratan los archivos de diseño CAD/3D como cajas negras binarias densas, ITO entiende la semántica física y eléctrica detrás de cada plano, lista de materiales (BOM) y asignación de pines de microcontroladores.
 
@@ -62,7 +62,8 @@ El uso de la CLI está estructurado con base en estándares de comandos de Git y
 | `ito select` | Menú interactivo de selección de proyectos que inyecta navegación automática a la consola activa. |
 | `ito link` | Enlaza un directorio físico externo mediante un explorador de carpetas visual de Windows. |
 | `ito links` | Lista todos los enlaces configurados en el proyecto indicando su motor y herramienta. |
-| `ito go <módulo>` | Navega de forma automática a la ruta del módulo seleccionado (firmware, electronics, etc.). |
+| `ito go <módulo>` | Copia al portapapeles la instrucción para navegar a un módulo enlazado (firmware, electronics, etc.). |
+| `ito update` | Comprueba y actualiza ITO a la última versión disponible en GitHub de forma manual. |
 
 ---
 
@@ -75,7 +76,16 @@ El comando `ito lint` realiza auditorías de integridad de circuitos buscando la
 
 ---
 
-## 4. Desarrollo Local
+## 4. Actualizaciones Automáticas
+
+ITO cuenta con un actualizador automático integrado conectado a GitHub Releases:
+- **Comprobación de fondo silenciosa**: Cada 24 horas, ITO realiza una consulta rápida (con un límite de 3 segundos de timeout) al iniciar cualquier comando ordinario para comprobar si existe una versión más nueva en GitHub de forma silenciosa.
+- **Actualización manual**: Puedes forzar la comprobación y actualización en cualquier momento utilizando el comando `ito update` o `ito update --force`.
+- **Soporte para repositorios privados**: Si el repositorio de ITO es privado, puedes configurar la variable de entorno `GITHUB_TOKEN` o `GH_TOKEN` en tu sistema para autenticar las peticiones del actualizador.
+
+---
+
+## 5. Desarrollo Local
 
 ### Prerrequisitos
 *   Rust (edición 2021) y `cargo`.
@@ -86,7 +96,7 @@ El comando `ito lint` realiza auditorías de integridad de circuitos buscando la
 # Comprobar la compilación de la biblioteca y ejecutable
 cargo check
 
-# Ejecutar la suite de pruebas unitarias e integrales (22 tests)
+# Ejecutar la suite de pruebas unitarias e integrales (23 tests)
 cargo test
 
 # Instalar globalmente el ejecutable de ITO en el sistema

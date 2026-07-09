@@ -25,7 +25,7 @@ enum WorkspaceSubcommand {
 enum AuthSubcommand {
     /// Inicia sesión con un token de API de ITO
     Login {
-        /// Token de API obtenido desde la web de Alexandria/ITOGravity
+        /// Token de API obtenido desde la web de ITO Gravity
         #[arg(long)]
         token: String,
     },
@@ -115,12 +115,23 @@ enum Commands {
     Login,
     /// Inicia sesión con tus credenciales de ITOGravity (Email y Contraseña)
     Logueo,
+    /// Comprueba y actualiza ITO a la última versión disponible desde GitHub
+    Update {
+        /// Fuerza la descarga y actualización omitiendo los límites de la caché
+        #[arg(short, long)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = ito::install_shell_wrappers();
     let cli = Cli::parse();
+
+    // Comprobación y actualización automática en segundo plano (ejecución una vez al día)
+    if !matches!(&cli.command, Commands::Update { .. }) {
+        let _ = ito::updater::check_and_update_background().await;
+    }
 
     match &cli.command {
         Commands::Init => {
@@ -1562,6 +1573,23 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => {
                     anyhow::bail!("{}", e);
+                }
+            }
+        }
+        Commands::Update { force } => {
+            println!("Comprobando actualizaciones en GitHub...");
+            match ito::updater::check_for_updates(*force).await {
+                Ok(Some(new_version)) => {
+                    println!("Actualización disponible: v{}.", new_version);
+                    if let Err(e) = ito::updater::download_and_install_update(&new_version).await {
+                        anyhow::bail!("Error al instalar la actualización: {}", e);
+                    }
+                }
+                Ok(None) => {
+                    println!("¡Ya estás usando la versión más reciente de ITO (v{})!", env!("CARGO_PKG_VERSION"));
+                }
+                Err(e) => {
+                    anyhow::bail!("Error al comprobar actualizaciones: {}", e);
                 }
             }
         }

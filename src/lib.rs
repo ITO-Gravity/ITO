@@ -5,6 +5,7 @@ pub mod linter;
 pub mod engines;
 pub mod ignore;
 pub mod cas;
+pub mod updater;
 
 use sha2::{Sha256, Digest};
 
@@ -813,6 +814,9 @@ pub fn open_folder_dialog(description: &str) -> Option<String> {
 }
 
 pub fn install_shell_wrappers() -> std::result::Result<(), String> {
+    // Limpiar ejecutables temporales o antiguos generados por el auto-actualizador
+    updater::cleanup_old_executable();
+
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(bin_dir) = current_exe.parent() {
             let old_exe = bin_dir.join("ito.exe");
