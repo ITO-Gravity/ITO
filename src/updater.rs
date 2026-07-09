@@ -3,7 +3,7 @@ use anyhow::{Result, Context};
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 
-const REPO_OWNER: &str = "Vasloth";
+const REPO_OWNER: &str = "ITO-Gravity";
 const REPO_NAME: &str = "ITO";
 const USER_AGENT: &str = "ito-cli-updater";
 
