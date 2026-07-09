@@ -1546,17 +1546,17 @@ async fn main() -> Result<()> {
             print!("Contraseña: ");
             io::stdout().flush().ok();
             
-            let password = match rpassword::read_password() {
-                Ok(p) => p,
-                Err(_) => anyhow::bail!("Error al leer la contraseña."),
-            };
-            let password = password.trim();
+            let mut password = String::new();
+            if io::stdin().read_line(&mut password).is_err() {
+                anyhow::bail!("Error al leer la contraseña.");
+            }
+            let password = password.trim().to_string();
 
             if email.is_empty() || password.is_empty() {
                 anyhow::bail!("El correo electrónico y la contraseña son obligatorios.");
             }
 
-            match ito::run_login(email, password).await {
+            match ito::run_login(email, &password).await {
                 Ok(msg) => {
                     println!("{} {}", "OK".green().bold(), msg);
                 }
