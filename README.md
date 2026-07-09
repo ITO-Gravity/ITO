@@ -60,9 +60,14 @@ El uso de la CLI está estructurado con base en estándares de comandos de Git y
 | `ito workspace` | Muestra la ruta física del Workspace global y el conteo de proyectos registrados. |
 | `ito workspace set [ruta]` | Configura o cambia el directorio de trabajo del Workspace global. |
 | `ito select` | Menú interactivo de selección de proyectos que inyecta navegación automática a la consola activa. |
+| `ito guia` | Inicia el asistente interactivo para guiar al operador paso a paso (alias de `select`). |
 | `ito link` | Enlaza un directorio físico externo mediante un explorador de carpetas visual de Windows. |
 | `ito links` | Lista todos los enlaces configurados en el proyecto indicando su motor y herramienta. |
 | `ito go <módulo>` | Copia al portapapeles la instrucción para navegar a un módulo enlazado (firmware, electronics, etc.). |
+| `ito login` | Inicia sesión con tus credenciales de ITO Gravity (Email y Contraseña). |
+| `ito clone <token>` | Clona un proyecto existente desde el servidor remoto de ITO Gravity. |
+| `ito push` | Envía la última versión local del proyecto al servidor remoto de ITO Gravity. |
+| `ito pull` | Descarga la última versión registrada del proyecto desde el servidor remoto de ITO Gravity. |
 | `ito update` | Comprueba y actualiza ITO a la última versión disponible en GitHub de forma manual. |
 
 ---
