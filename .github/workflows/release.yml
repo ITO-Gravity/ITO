@@ -1,0 +1,50 @@
+name: Compile and Publish Releases
+
+on:
+  push:
+    tags:
+      - 'v*' # Se activa automáticamente al empujar tags de versiones como v0.2.0, v1.0.0, etc.
+
+permissions:
+  contents: write # Permiso requerido para adjuntar archivos a la sección de Releases
+
+jobs:
+  build-and-release:
+    name: Build and Release Windows Installer
+    runs-on: windows-latest
+
+    steps:
+      # 1. Descargar el código fuente del repositorio
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Instalar el compilador de Rust
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # 3. Compilar el binario de ITO en modo optimizado (Release)
+      - name: Cargo Build Release
+        run: cargo build --release
+
+      # 4. Crear envoltorio CMD local para el instalador
+      - name: Create wrapper CMD
+        run: |
+          copy target\release\_ito.exe target\release\ito-windows-x86_64.exe
+          echo @echo off > target\release\ito.cmd
+          echo _ito.exe %* >> target\release\ito.cmd
+
+      # 5. Compilar el Instalador de Windows usando Inno Setup (ya viene preinstalado en GitHub Actions)
+      - name: Compile Inno Setup Installer
+        run: iscc installer.iss
+
+      # 6. Crear el Release en GitHub y adjuntar tanto el instalador .exe como el ejecutable puro
+      - name: Create GitHub Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Output/ito-installer-x86_64.exe
+            target/release/ito-windows-x86_64.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
