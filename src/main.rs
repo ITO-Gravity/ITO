@@ -151,7 +151,7 @@ async fn main() -> Result<()> {
                     .to_string();
 
                 let default_config = Config {
-                    project_id: project_name,
+                    project_id: project_name.clone(),
                     remote_url: "https://api.alexandria-hq.com/v1/reports".to_string(),
                     token: None,
                 };
@@ -161,6 +161,42 @@ async fn main() -> Result<()> {
                 println!("Repositorio Ito inicializado con éxito. Configuración creada en '.ito/config.toml'.");
             } else {
                 println!("El repositorio Ito ya estaba inicializado en este directorio.");
+            }
+
+            let ito_json_path = current_dir.join("ito.json");
+            if !ito_json_path.exists() {
+                let project_name = current_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("ito-project")
+                    .to_string();
+                let project_uuid = uuid::Uuid::new_v4().to_string();
+                let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                let created_by = std::env::var("USER")
+                    .or_else(|_| std::env::var("USERNAME"))
+                    .unwrap_or_else(|_| "unknown".to_string());
+                let config = models::ItoProjectConfig {
+                    format_version: "1.0".to_string(),
+                    project_name,
+                    project_uuid,
+                    created_at,
+                    created_by,
+                    modules: models::ItoProjectModules {
+                        firmware: true,
+                        electronics: true,
+                        mechanical: true,
+                        documentation: true,
+                        manufacturing: true,
+                    },
+                    current_revision: "REV-0001".to_string(),
+                    license: "MIT".to_string(),
+                    version: "0.1.0".to_string(),
+                    links: None,
+                };
+                if let Ok(json_content) = serde_json::to_string_pretty(&config) {
+                    let _ = std::fs::write(&ito_json_path, json_content);
+                    println!("Archivo 'ito.json' creado en la raíz del proyecto.");
+                }
             }
         }
         Commands::Status => {
@@ -814,7 +850,7 @@ async fn main() -> Result<()> {
                                 println!("{}", "Error al leer la ruta.".red());
                                 std::process::exit(1);
                             }
-                            break std::path::PathBuf::from(path_input.trim());
+                            break std::path::PathBuf::from(path_input.trim().trim_matches('"').trim());
                         } else {
                             println!("{}", "Opción inválida. Intente de nuevo.".yellow());
                         }
@@ -896,7 +932,7 @@ async fn main() -> Result<()> {
                                 println!("{}", "Error al leer la ruta.".red());
                                 std::process::exit(1);
                             }
-                            std::path::PathBuf::from(path_input.trim())
+                            std::path::PathBuf::from(path_input.trim().trim_matches('"').trim())
                         }
                     };
 
@@ -1151,7 +1187,7 @@ async fn main() -> Result<()> {
                             }
 
                             if menu_input_lower == "1" || menu_input_lower == "entrar" || menu_input_lower == "ir" || menu_input_lower.starts_with("cd") {
-                                let target_path = if menu_input_lower.starts_with("cd ") {
+                                let raw_target = if menu_input_lower.starts_with("cd ") {
                                     let path_part = menu_input_trimmed[3..].trim().trim_matches('"').trim_matches('\'').trim();
                                     if !path_part.is_empty() {
                                         std::path::PathBuf::from(path_part)
@@ -1160,6 +1196,11 @@ async fn main() -> Result<()> {
                                     }
                                 } else {
                                     chosen_project.path.clone()
+                                };
+                                let target_path = if raw_target.is_absolute() {
+                                    raw_target
+                                } else {
+                                    chosen_project.path.join(raw_target)
                                 };
                                 
                                 let cd_command = format!("cd \"{}\"", target_path.display());
@@ -1255,7 +1296,7 @@ async fn main() -> Result<()> {
                                         if io::stdin().read_line(&mut path_input).is_err() {
                                             continue;
                                         }
-                                        std::path::PathBuf::from(path_input.trim())
+                                        std::path::PathBuf::from(path_input.trim().trim_matches('"').trim())
                                     }
                                 };
 
@@ -1371,7 +1412,7 @@ async fn main() -> Result<()> {
                         println!("{}", "Error al leer la ruta.".red());
                         std::process::exit(1);
                     }
-                    std::path::PathBuf::from(path_input.trim())
+                    std::path::PathBuf::from(path_input.trim().trim_matches('"').trim())
                 }
             };
 
@@ -1537,7 +1578,13 @@ async fn main() -> Result<()> {
             };
 
             if let Some(link) = links_map.get(&target_key) {
-                let cd_command = format!("cd \"{}\"", link.path);
+                let raw_path = std::path::PathBuf::from(&link.path);
+                let target_path = if raw_path.is_absolute() {
+                    raw_path
+                } else {
+                    root.join(raw_path)
+                };
+                let cd_command = format!("cd \"{}\"", target_path.display());
                 ito::copy_to_clipboard(&cd_command);
                 ito::write_goto_script(&cd_command);
                 let _ = ito::install_shell_wrappers();

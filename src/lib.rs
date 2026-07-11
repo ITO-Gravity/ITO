@@ -79,7 +79,13 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
                     let mut resolved = false;
                     if let Some(ref links) = cfg.links {
                         if let Some(link) = links.get(module_name) {
-                            active_modules.push((module_name.to_string(), std::path::PathBuf::from(&link.path), link.engine.clone()));
+                            let raw_path = std::path::PathBuf::from(&link.path);
+                            let resolved_path = if raw_path.is_absolute() {
+                                raw_path
+                            } else {
+                                project_dir.join(raw_path)
+                            };
+                            active_modules.push((module_name.to_string(), resolved_path, link.engine.clone()));
                             resolved = true;
                         }
                     }
@@ -248,7 +254,12 @@ pub fn run_restore(project_dir: std::path::PathBuf, target_hash: &str) -> Result
 
         for (key, payload) in &matched_commit.modules {
             let path = if let Some(link) = links.get(key) {
-                std::path::PathBuf::from(&link.path)
+                let raw_path = std::path::PathBuf::from(&link.path);
+                if raw_path.is_absolute() {
+                    raw_path
+                } else {
+                    project_dir.join(raw_path)
+                }
             } else {
                 if key == "electronics" {
                     project_dir.clone()
@@ -629,7 +640,13 @@ pub fn find_project_root(start_dir: &std::path::Path) -> Option<std::path::PathB
                     if let Ok(config) = serde_json::from_str::<models::ItoProjectConfig>(&content) {
                         if let Some(links) = config.links {
                             for link in links.values() {
-                                let link_str = std::path::PathBuf::from(&link.path).to_string_lossy().to_lowercase().replace('\\', "/");
+                                let raw_path = std::path::PathBuf::from(&link.path);
+                                let resolved_path = if raw_path.is_absolute() {
+                                    raw_path
+                                } else {
+                                    project.path.join(raw_path)
+                                };
+                                let link_str = resolved_path.to_string_lossy().to_lowercase().replace('\\', "/");
                                 if start_str == link_str || start_str.starts_with(&format!("{}/", link_str)) {
                                     return Some(project.path);
                                 }
@@ -660,7 +677,13 @@ pub fn find_linked_module_in_project(project_root: &std::path::Path, current_dir
                     let current_str = current_dir.to_string_lossy().to_lowercase().replace('\\', "/");
                     for (key, name) in &modules {
                         if let Some(link) = links.get(*key) {
-                            let link_str = std::path::PathBuf::from(&link.path).to_string_lossy().to_lowercase().replace('\\', "/");
+                            let raw_path = std::path::PathBuf::from(&link.path);
+                            let resolved_path = if raw_path.is_absolute() {
+                                raw_path
+                            } else {
+                                project_root.join(raw_path)
+                            };
+                            let link_str = resolved_path.to_string_lossy().to_lowercase().replace('\\', "/");
                             if current_str == link_str || current_str.starts_with(&format!("{}/", link_str)) {
                                 return Some((key.to_string(), name.to_string()));
                             }
@@ -727,28 +750,60 @@ pub fn detect_tool_in_path(path: &std::path::Path) -> String {
 }
 
 pub fn run_link(project_root: std::path::PathBuf, module_key: &str, target_path: std::path::PathBuf) -> Result<String, String> {
-    if !target_path.is_dir() {
-        return Err(format!("La ruta especificada '{}' no es un directorio válido o no existe.", target_path.display()));
+    let resolved_target = if target_path.is_absolute() {
+        target_path.clone()
+    } else {
+        project_root.join(&target_path)
+    };
+
+    if !resolved_target.is_dir() {
+        return Err(format!("La ruta especificada '{}' no es un directorio válido o no existe.", resolved_target.display()));
     }
 
     let ito_json_path = project_root.join("ito.json");
-    if !ito_json_path.exists() {
-        return Err("No se encontró el archivo ito.json en el proyecto actual. ¿Inicializaste el proyecto con 'ito init' o 'ito new'?".to_string());
-    }
-
-    // Cargar ito.json existente
-    let content = std::fs::read_to_string(&ito_json_path)
-        .map_err(|e| format!("Error al leer ito.json: {}", e))?;
-    let mut config: models::ItoProjectConfig = serde_json::from_str(&content)
-        .map_err(|e| format!("Error al parsear ito.json: {}", e))?;
+    let mut config = if !ito_json_path.exists() {
+        let project_name = project_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("ito-project")
+            .to_string();
+        let project_uuid = uuid::Uuid::new_v4().to_string();
+        let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let created_by = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "unknown".to_string());
+        models::ItoProjectConfig {
+            format_version: "1.0".to_string(),
+            project_name,
+            project_uuid,
+            created_at,
+            created_by,
+            modules: models::ItoProjectModules {
+                firmware: true,
+                electronics: true,
+                mechanical: true,
+                documentation: true,
+                manufacturing: true,
+            },
+            current_revision: "REV-0001".to_string(),
+            license: "MIT".to_string(),
+            version: "0.1.0".to_string(),
+            links: None,
+        }
+    } else {
+        let content = std::fs::read_to_string(&ito_json_path)
+            .map_err(|e| format!("Error al leer ito.json: {}", e))?;
+        serde_json::from_str(&content)
+            .map_err(|e| format!("Error al parsear ito.json: {}", e))?
+    };
 
     // Detectar herramienta
-    let tool_detected = detect_tool_in_path(&target_path);
+    let tool_detected = detect_tool_in_path(&resolved_target);
 
     // Detectar motor por defecto según el módulo y herramientas presentes
     let engine_detected = match module_key {
         "firmware" => {
-            if target_path.join(".git").is_dir() {
+            if resolved_target.join(".git").is_dir() {
                 "git".to_string()
             } else {
                 "file-hash".to_string()
@@ -791,7 +846,8 @@ pub fn write_goto_script(cd_command: &str) {
 
 pub fn open_folder_dialog(description: &str) -> Option<String> {
     let ps_command = format!(
-        "Add-Type -AssemblyName System.Windows.Forms; \
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
+         Add-Type -AssemblyName System.Windows.Forms; \
          $f = New-Object System.Windows.Forms.FolderBrowserDialog; \
          $f.Description = '{}'; \
          $f.ShowNewFolderButton = $true; \
@@ -1107,7 +1163,12 @@ pub fn get_latest_design_json(project_dir: &std::path::Path) -> std::result::Res
             if let Ok(config) = serde_json::from_str::<models::ItoProjectConfig>(&content) {
                 if let Some(links) = config.links {
                     if let Some(link) = links.get("electronics") {
-                        let path = std::path::PathBuf::from(&link.path);
+                        let raw_path = std::path::PathBuf::from(&link.path);
+                        let path = if raw_path.is_absolute() {
+                            raw_path
+                        } else {
+                            project_dir.join(raw_path)
+                        };
                         if path.exists() {
                             target_dir = Some(path);
                         }
@@ -1259,10 +1320,16 @@ pub fn create_project_zip(project_dir: &std::path::Path) -> std::result::Result<
         walk_and_zip_dir(project_dir, project_dir, "", &filter, &mut zip, options, &links, true)?;
 
         for (module_name, link) in &links {
-            let external_path = std::path::Path::new(&link.path);
+            let raw_path = std::path::Path::new(&link.path);
+            let external_path = if raw_path.is_absolute() {
+                raw_path.to_path_buf()
+            } else {
+                project_dir.join(raw_path)
+            };
+
             if external_path.exists() && external_path.is_dir() {
-                let ext_filter = ignore::IgnoreFilter::new(external_path);
-                walk_and_zip_dir(external_path, external_path, module_name, &ext_filter, &mut zip, options, &links, false)?;
+                let ext_filter = ignore::IgnoreFilter::new(&external_path);
+                walk_and_zip_dir(&external_path, &external_path, module_name, &ext_filter, &mut zip, options, &links, false)?;
             }
         }
 
@@ -1485,7 +1552,12 @@ pub async fn run_pull(project_dir: std::path::PathBuf) -> std::result::Result<St
             if let Ok(cfg) = serde_json::from_str::<models::ItoProjectConfig>(&c) {
                 if let Some(links) = cfg.links {
                     if let Some(link) = links.get("electronics") {
-                        electronics_path = std::path::PathBuf::from(&link.path);
+                        let raw_path = std::path::PathBuf::from(&link.path);
+                        electronics_path = if raw_path.is_absolute() {
+                            raw_path
+                        } else {
+                            project_dir.join(raw_path)
+                        };
                     }
                 }
             }
@@ -2111,6 +2183,46 @@ mod tests {
         let mech_content = std::fs::read_to_string(mech_src_dir.join("enclosure.step")).unwrap();
         assert_eq!(fw_content, "void setup() {}");
         assert_eq!(mech_content, "STEP DATA V1");
+
+        // Limpiar
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_zip_with_relative_link() {
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-rel-zip-{}", unique_id));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // 1. Crear proyecto
+        let (p_path, _) = run_new(temp_dir.clone(), "MyProj").unwrap();
+
+        // 2. Crear una carpeta externa simulada
+        let fw_path = temp_dir.join("MyExternalFW");
+        std::fs::create_dir_all(&fw_path).unwrap();
+        std::fs::write(fw_path.join("main.cpp"), "void main() {}").unwrap();
+
+        // 3. Vincular usando ruta relativa (relativa a p_path)
+        let relative_target = std::path::PathBuf::from("../MyExternalFW");
+        run_link(p_path.clone(), "firmware", relative_target).unwrap();
+
+        // 4. Crear ZIP del proyecto
+        let zip_bytes = create_project_zip(&p_path).unwrap();
+        assert!(!zip_bytes.is_empty());
+
+        // 5. Leer el ZIP y verificar que firmware/main.cpp existe en él
+        let reader = std::io::Cursor::new(zip_bytes);
+        let mut zip = zip::ZipArchive::new(reader).unwrap();
+        
+        let mut found_main_cpp = false;
+        for i in 0..zip.len() {
+            let file = zip.by_index(i).unwrap();
+            if file.name() == "firmware/main.cpp" {
+                found_main_cpp = true;
+                break;
+            }
+        }
+        assert!(found_main_cpp, "No se encontró el archivo firmware/main.cpp en el archivo zip empaquetado");
 
         // Limpiar
         std::fs::remove_dir_all(&temp_dir).ok();
