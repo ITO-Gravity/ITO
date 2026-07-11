@@ -2215,14 +2215,22 @@ mod tests {
         let mut zip = zip::ZipArchive::new(reader).unwrap();
         
         let mut found_main_cpp = false;
+        let mut content_matched = false;
         for i in 0..zip.len() {
-            let file = zip.by_index(i).unwrap();
+            let mut file = zip.by_index(i).unwrap();
             if file.name() == "firmware/main.cpp" {
                 found_main_cpp = true;
+                let mut buf = Vec::new();
+                use std::io::Read;
+                file.read_to_end(&mut buf).unwrap();
+                if String::from_utf8(buf).unwrap() == "void main() {}" {
+                    content_matched = true;
+                }
                 break;
             }
         }
         assert!(found_main_cpp, "No se encontró el archivo firmware/main.cpp en el archivo zip empaquetado");
+        assert!(content_matched, "El contenido del archivo en el zip no coincide o está vacío");
 
         // Limpiar
         std::fs::remove_dir_all(&temp_dir).ok();
