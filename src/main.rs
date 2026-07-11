@@ -929,8 +929,8 @@ async fn main() -> Result<()> {
                         println!("{}", "Error al leer la entrada.".red());
                         std::process::exit(1);
                     }
-                    let option = option.trim();
-                    if option == "1" {
+                    let option = option.trim().to_lowercase();
+                    if option == "1" || option == "workspace" {
                         match ito::load_workspace_config() {
                             Ok(Some(cfg)) => {
                                 break std::path::PathBuf::from(&cfg.workspace).join("Projects");
@@ -945,7 +945,7 @@ async fn main() -> Result<()> {
                                 std::process::exit(1);
                             }
                         }
-                    } else if option == "2" {
+                    } else if option == "2" || option == "directorio" || option == "actual" || option == "terminal" {
                         match std::env::current_dir() {
                             Ok(dir) => break dir,
                             Err(err) => {
@@ -953,7 +953,7 @@ async fn main() -> Result<()> {
                                 std::process::exit(1);
                             }
                         }
-                    } else if option == "3" {
+                    } else if option == "3" || option == "salir" || option == "exit" || option == "q" {
                         std::process::exit(0);
                     } else {
                         println!("{}", "Opción inválida. Intente de nuevo.".yellow());
@@ -976,15 +976,15 @@ async fn main() -> Result<()> {
                         if io::stdin().read_line(&mut choice).is_err() {
                             std::process::exit(1);
                         }
-                        match choice.trim() {
-                            "1" => {
+                        let choice_trimmed = choice.trim().to_lowercase();
+                        match choice_trimmed.as_str() {
+                            "1" | "clonar" | "clone" => {
                                 print!("Ingrese el Token de API del proyecto, o su ID/nombre/URL (si ya inició sesión): ");
                                 io::stdout().flush().ok();
                                 let mut token_input = String::new();
                                 if io::stdin().read_line(&mut token_input).is_ok() {
                                     let token_trimmed = token_input.trim().to_string();
                                     if !token_trimmed.is_empty() {
-                                        // Cambiar temporalmente el directorio para clonar dentro de la carpeta explorada
                                         let prev_dir = std::env::current_dir().unwrap_or(std::path::PathBuf::from("."));
                                         let _ = std::env::set_current_dir(&explore_path);
                                         match ito::run_clone(token_trimmed).await {
@@ -995,7 +995,7 @@ async fn main() -> Result<()> {
                                     }
                                 }
                             }
-                            "2" => {
+                            "2" | "nuevo" | "new" => {
                                 print!("Ingrese el nombre del nuevo proyecto: ");
                                 io::stdout().flush().ok();
                                 let mut name_input = String::new();
@@ -1009,7 +1009,7 @@ async fn main() -> Result<()> {
                                     }
                                 }
                             }
-                            "3" => {
+                            "3" | "volver" | "back" => {
                                 continue 'main_select;
                             }
                             _ => std::process::exit(0),
@@ -1035,14 +1035,15 @@ async fn main() -> Result<()> {
                         println!("{}", "Error al leer la selección.".red());
                         std::process::exit(1);
                     }
-                    let selection_input = selection_input.trim();
-                    if selection_input.to_lowercase() == "q" {
+                    let selection_trimmed = selection_input.trim();
+                    let selection_lower = selection_trimmed.to_lowercase();
+                    if selection_lower == "q" || selection_lower == "salir" || selection_lower == "exit" {
                         std::process::exit(0);
                     }
-                    if selection_input.to_lowercase() == "v" {
+                    if selection_lower == "v" || selection_lower == "volver" {
                         continue 'main_select;
                     }
-                    if selection_input.to_lowercase() == "c" {
+                    if selection_lower == "c" || selection_lower == "clonar" || selection_lower == "clone" {
                         print!("Ingrese el Token de API del proyecto, o su ID/nombre/URL (si ya inició sesión): ");
                         io::stdout().flush().ok();
                         let mut token_input = String::new();
@@ -1060,7 +1061,7 @@ async fn main() -> Result<()> {
                         }
                         continue 'outer_selection;
                     }
-                    if selection_input.to_lowercase() == "n" {
+                    if selection_lower == "n" || selection_lower == "nuevo" || selection_lower == "new" {
                         print!("Ingrese el nombre del nuevo proyecto: ");
                         io::stdout().flush().ok();
                         let mut name_input = String::new();
@@ -1076,185 +1077,234 @@ async fn main() -> Result<()> {
                         continue 'outer_selection;
                     }
 
-                    if let Ok(idx) = selection_input.parse::<usize>() {
+                    let mut matched_idx = None;
+                    if let Ok(idx) = selection_lower.parse::<usize>() {
                         if idx > 0 && idx <= projects.len() {
-                            let chosen_project = &projects[idx - 1];
+                            matched_idx = Some(idx - 1);
+                        }
+                    } else {
+                        // Intentar coincidir por nombre de proyecto de forma insensible a mayúsculas/minúsculas
+                        if let Some(pos) = projects.iter().position(|p| p.name.to_lowercase() == selection_lower) {
+                            matched_idx = Some(pos);
+                        }
+                    }
 
-                            let cd_command = format!("cd \"{}\"", chosen_project.path.display());
-                            ito::copy_to_clipboard(&cd_command);
-                            ito::write_goto_script(&cd_command);
-                            let _ = ito::install_shell_wrappers();
+                    if let Some(project_idx) = matched_idx {
+                        let chosen_project = &projects[project_idx];
+                        loop {
+                            println!("\n{}", "============================================================".dimmed());
+                            println!("{} {}", "Gestión de Proyecto:".bold(), chosen_project.name.cyan().bold());
+                            println!("{}\n", chosen_project.path.display().to_string().dimmed());
+                            println!("[1] Entrar al proyecto (copia el comando 'cd' de navegación y sale)");
+                            println!("[2] Descargar últimos cambios del servidor (ito pull)");
+                            println!("[3] Subir cambios locales al servidor (ito push)");
+                            println!("[4] Ver estado de enlaces y módulos (ito links)");
+                            println!("[5] Vincular un módulo físico (ito link)");
+                            println!("[6] Ver historial de versiones (ito history)");
+                            println!("[7] Volver a la lista de proyectos");
+                            println!("[8] Salir del asistente\n");
 
-                            loop {
-                                println!("\n{}", "============================================================".dimmed());
-                                println!("{} {}", "Gestión de Proyecto:".bold(), chosen_project.name.cyan().bold());
-                                println!("{}\n", chosen_project.path.display().to_string().dimmed());
-                                println!("[1] Entrar al proyecto (copia el comando 'cd' de navegación y sale)");
-                                println!("[2] Descargar últimos cambios del servidor (ito pull)");
-                                println!("[3] Subir cambios locales al servidor (ito push)");
-                                println!("[4] Ver estado de enlaces y módulos (ito links)");
-                                println!("[5] Vincular un módulo físico (ito link)");
-                                println!("[6] Ver historial de versiones (ito history)");
-                                println!("[7] Volver a la lista de proyectos");
-                                println!("[8] Salir del asistente\n");
+                            print!("Seleccione una opción: ");
+                            io::stdout().flush().ok();
+                            let mut menu_input = String::new();
+                            if io::stdin().read_line(&mut menu_input).is_err() {
+                                println!("{}", "Error al leer la opción.".red());
+                                std::process::exit(1);
+                            }
+
+                            let menu_input_trimmed = menu_input.trim();
+                            let menu_input_lower = menu_input_trimmed.to_lowercase();
+                            
+                            if menu_input_trimmed.is_empty() {
+                                continue;
+                            }
+
+                            // Comprobar si es un comando ito o git para ejecutarlo en el proyecto
+                            let words = parse_shell_words(menu_input_trimmed);
+                            if !words.is_empty() {
+                                let first_word = words[0].to_lowercase();
+                                if first_word == "ito" || first_word == "_ito" || first_word == "ito.exe" || first_word == "_ito.exe" || first_word == "git" {
+                                    let exe_path = if first_word == "git" {
+                                        std::path::PathBuf::from("git")
+                                    } else {
+                                        std::env::current_exe().unwrap_or_default()
+                                    };
+                                    
+                                    if !exe_path.as_os_str().is_empty() {
+                                        println!("\n{} Ejecutando: {} {}", ">".cyan().bold(), words[0], words[1..].join(" "));
+                                        let mut cmd = std::process::Command::new(exe_path);
+                                        cmd.args(&words[1..]);
+                                        cmd.current_dir(&chosen_project.path);
+                                        match cmd.status() {
+                                            Ok(status) => {
+                                                if !status.success() {
+                                                    println!("\nEl comando terminó con estado de error: {}", status);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                println!("\n{} Error al ejecutar el comando: {}", "Error:".red().bold(), e);
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
+                            }
+
+                            if menu_input_lower == "1" || menu_input_lower == "entrar" || menu_input_lower == "ir" || menu_input_lower.starts_with("cd") {
+                                let target_path = if menu_input_lower.starts_with("cd ") {
+                                    let path_part = menu_input_trimmed[3..].trim().trim_matches('"').trim_matches('\'').trim();
+                                    if !path_part.is_empty() {
+                                        std::path::PathBuf::from(path_part)
+                                    } else {
+                                        chosen_project.path.clone()
+                                    }
+                                } else {
+                                    chosen_project.path.clone()
+                                };
+                                
+                                let cd_command = format!("cd \"{}\"", target_path.display());
+                                ito::copy_to_clipboard(&cd_command);
+                                ito::write_goto_script(&cd_command);
+                                let _ = ito::install_shell_wrappers();
+                                
+                                println!("\nNavegación automática ejecutada (abre una nueva terminal para activar el autocompletado si no se actualizó de inmediato).");
+                                println!("(Comando cd copiado al portapapeles como respaldo)");
+                                std::process::exit(0);
+                            } else if menu_input_lower == "2" || menu_input_lower == "pull" || menu_input_lower == "descargar" {
+                                println!("\nDescargando versión completa desde el servidor...");
+                                match ito::run_pull(chosen_project.path.clone()).await {
+                                    Ok(msg) => println!("\n{} {}", "OK".green().bold(), msg),
+                                    Err(e) => println!("\n{} Error: {}", "ERROR".red().bold(), e),
+                                }
+                            } else if menu_input_lower == "3" || menu_input_lower == "push" || menu_input_lower == "subir" {
+                                println!("\nEnviando última versión al servidor...");
+                                match ito::run_push(chosen_project.path.clone()).await {
+                                    Ok(msg) => println!("\n{} Sincronización exitosa: {}", "OK".green().bold(), msg),
+                                    Err(e) => println!("\n{} Error: {}", "ERROR".red().bold(), e),
+                                }
+                            } else if menu_input_lower == "4" || menu_input_lower == "links" {
+                                let ito_json_path = chosen_project.path.join("ito.json");
+                                if !ito_json_path.exists() {
+                                    println!("\n{} No se encontró el archivo ito.json en el proyecto.", "Error:".red().bold());
+                                } else if let Ok(content) = std::fs::read_to_string(&ito_json_path) {
+                                    if let Ok(config) = serde_json::from_str::<ito::models::ItoProjectConfig>(&content) {
+                                        println!("\nMódulos vinculados en {}:", config.project_name.cyan().bold());
+                                        let modules = [
+                                            ("firmware", "Firmware"),
+                                            ("electronics", "Electrónica"),
+                                            ("mechanical", "Mecánica"),
+                                            ("documentation", "Documentación"),
+                                            ("manufacturing", "Manufactura"),
+                                        ];
+                                        let links_map = config.links.unwrap_or_default();
+                                        for (key, name) in &modules {
+                                            println!("\n{}", name.bold());
+                                            if let Some(link) = links_map.get(*key) {
+                                                println!("  {}", "Vinculado".green().bold());
+                                                println!("  Herramienta: {}", link.tool.cyan());
+                                                println!("  Motor:       {}", link.engine.yellow());
+                                                println!("  Ruta:        {}", link.path.dimmed());
+                                            } else {
+                                                println!("  {}", "No vinculado".red());
+                                            }
+                                        }
+                                    } else {
+                                        println!("\n{} Error al parsear ito.json.", "Error:".red().bold());
+                                    }
+                                } else {
+                                    println!("\n{} Error al leer ito.json.", "Error:".red().bold());
+                                }
+                            } else if menu_input_lower == "5" || menu_input_lower == "link" || menu_input_lower == "vincular" {
+                                println!("\nVincular Módulo Externo en {}", chosen_project.name.cyan().bold());
+                                println!("¿Qué tipo de módulo desea vincular?\n");
+                                println!("[1] Firmware");
+                                println!("[2] Electrónica");
+                                println!("[3] Mecánica");
+                                println!("[4] Documentación");
+                                println!("[5] Manufactura");
+                                println!("[6] Volver al menú del proyecto\n");
 
                                 print!("Seleccione una opción: ");
                                 io::stdout().flush().ok();
-                                let mut menu_input = String::new();
-                                if io::stdin().read_line(&mut menu_input).is_err() {
-                                    println!("{}", "Error al leer la opción.".red());
-                                    std::process::exit(1);
+                                let mut link_opt = String::new();
+                                if io::stdin().read_line(&mut link_opt).is_err() {
+                                    continue;
                                 }
+                                let (module_key, module_name) = match link_opt.trim().to_lowercase().as_str() {
+                                    "1" | "firmware" => ("firmware", "Firmware"),
+                                    "2" | "electrónica" | "electronica" | "electronics" => ("electronics", "Electrónica"),
+                                    "3" | "mecánica" | "mecanica" | "mechanical" => ("mechanical", "Mecánica"),
+                                    "4" | "documentación" | "documentacion" | "documentation" => ("documentation", "Documentación"),
+                                    "5" | "manufactura" | "manufacturing" => ("manufacturing", "Manufactura"),
+                                    _ => continue,
+                                };
 
-                                match menu_input.trim() {
-                                    "1" => {
-                                        println!("\nNavegación automática ejecutada (abre una nueva terminal para activar el autocompletado si no se actualizó de inmediato).");
-                                        println!("(Comando cd copiado al portapapeles como respaldo)");
-                                        std::process::exit(0);
+                                println!("\nAbriendo explorador de Windows para seleccionar la carpeta...");
+                                let selected_path = ito::open_folder_dialog(&format!("Selecciona la carpeta de {}", module_name));
+                                let target_path = match selected_path {
+                                    Some(path) => {
+                                        println!("Carpeta seleccionada: {}", path.cyan().bold());
+                                        ito::copy_to_clipboard(&path);
+                                        std::path::PathBuf::from(path)
                                     }
-                                    "2" => {
-                                        println!("\nDescargando versión completa desde el servidor...");
-                                        match ito::run_pull(chosen_project.path.clone()).await {
-                                            Ok(msg) => println!("\n{} {}", "OK".green().bold(), msg),
-                                            Err(e) => println!("\n{} Error: {}", "ERROR".red().bold(), e),
-                                        }
-                                    }
-                                    "3" => {
-                                        println!("\nEnviando última versión al servidor...");
-                                        match ito::run_push(chosen_project.path.clone()).await {
-                                            Ok(msg) => println!("\n{} Sincronización exitosa: {}", "OK".green().bold(), msg),
-                                            Err(e) => println!("\n{} Error: {}", "ERROR".red().bold(), e),
-                                        }
-                                    }
-                                    "4" => {
-                                        let ito_json_path = chosen_project.path.join("ito.json");
-                                        if !ito_json_path.exists() {
-                                            println!("\n{} No se encontró el archivo ito.json en el proyecto.", "Error:".red().bold());
-                                        } else if let Ok(content) = std::fs::read_to_string(&ito_json_path) {
-                                            if let Ok(config) = serde_json::from_str::<ito::models::ItoProjectConfig>(&content) {
-                                                println!("\nMódulos vinculados en {}:", config.project_name.cyan().bold());
-                                                let modules = [
-                                                    ("firmware", "Firmware"),
-                                                    ("electronics", "Electrónica"),
-                                                    ("mechanical", "Mecánica"),
-                                                    ("documentation", "Documentación"),
-                                                    ("manufacturing", "Manufactura"),
-                                                ];
-                                                let links_map = config.links.unwrap_or_default();
-                                                for (key, name) in &modules {
-                                                    println!("\n{}", name.bold());
-                                                    if let Some(link) = links_map.get(*key) {
-                                                        println!("  {}", "Vinculado".green().bold());
-                                                        println!("  Herramienta: {}", link.tool.cyan());
-                                                        println!("  Motor:       {}", link.engine.yellow());
-                                                        println!("  Ruta:        {}", link.path.dimmed());
-                                                    } else {
-                                                        println!("  {}", "No vinculado".red());
-                                                    }
-                                                }
-                                            } else {
-                                                println!("\n{} Error al parsear ito.json.", "Error:".red().bold());
-                                            }
-                                        } else {
-                                            println!("\n{} Error al leer ito.json.", "Error:".red().bold());
-                                        }
-                                    }
-                                    "5" => {
-                                        println!("\nVincular Módulo Externo en {}", chosen_project.name.cyan().bold());
-                                        println!("¿Qué tipo de módulo desea vincular?\n");
-                                        println!("[1] Firmware");
-                                        println!("[2] Electrónica");
-                                        println!("[3] Mecánica");
-                                        println!("[4] Documentación");
-                                        println!("[5] Manufactura");
-                                        println!("[6] Volver al menú del proyecto\n");
-
-                                        print!("Seleccione una opción: ");
+                                    None => {
+                                        println!("{}", "Warning: Diálogo cancelado. Ingrese la ruta manual:".yellow());
+                                        print!("Ruta absoluta: ");
                                         io::stdout().flush().ok();
-                                        let mut link_opt = String::new();
-                                        if io::stdin().read_line(&mut link_opt).is_err() {
+                                        let mut path_input = String::new();
+                                        if io::stdin().read_line(&mut path_input).is_err() {
                                             continue;
                                         }
-                                        let (module_key, module_name) = match link_opt.trim() {
-                                            "1" => ("firmware", "Firmware"),
-                                            "2" => ("electronics", "Electrónica"),
-                                            "3" => ("mechanical", "Mecánica"),
-                                            "4" => ("documentation", "Documentación"),
-                                            "5" => ("manufacturing", "Manufactura"),
-                                            _ => continue,
-                                        };
+                                        std::path::PathBuf::from(path_input.trim())
+                                    }
+                                };
 
-                                        println!("\nAbriendo explorador de Windows para seleccionar la carpeta...");
-                                        let selected_path = ito::open_folder_dialog(&format!("Selecciona la carpeta de {}", module_name));
-                                        let target_path = match selected_path {
-                                            Some(path) => {
-                                                println!("Carpeta seleccionada: {}", path.cyan().bold());
-                                                ito::copy_to_clipboard(&path);
-                                                std::path::PathBuf::from(path)
-                                            }
-                                            None => {
-                                                println!("{}", "Warning: Diálogo cancelado. Ingrese la ruta manual:".yellow());
-                                                print!("Ruta absoluta: ");
-                                                io::stdout().flush().ok();
-                                                let mut path_input = String::new();
-                                                if io::stdin().read_line(&mut path_input).is_err() {
-                                                    continue;
-                                                }
-                                                std::path::PathBuf::from(path_input.trim())
-                                            }
-                                        };
-
-                                        match ito::run_link(chosen_project.path.clone(), module_key, target_path.clone()) {
-                                            Ok(tool) => {
-                                                if tool == "Unknown" {
-                                                    println!("\nWarning: No se pudo identificar el software automáticamente.");
-                                                } else {
-                                                    println!("\nProyecto {} detectado.", tool.green().bold());
-                                                }
-                                                println!("Módulo {} vinculado correctamente a: {}", module_name.green().bold(), target_path.display().to_string().cyan());
-                                            }
-                                            Err(err) => {
-                                                println!("\nError al vincular: {}", err.red().bold());
-                                            }
+                                match ito::run_link(chosen_project.path.clone(), module_key, target_path.clone()) {
+                                    Ok(tool) => {
+                                        if tool == "Unknown" {
+                                            println!("\nWarning: No se pudo identificar el software automáticamente.");
+                                        } else {
+                                            println!("\nProyecto {} detectado.", tool.green().bold());
                                         }
+                                        println!("Módulo {} vinculado correctamente a: {}", module_name.green().bold(), target_path.display().to_string().cyan());
                                     }
-                                    "6" => {
-                                        let history_path = chosen_project.path.join(".ito").join("history.toml");
-                                        if !history_path.exists() {
-                                            println!("\n{}", "No hay ningún commit registrado en este repositorio todavía.".yellow());
-                                            println!("Comienza guardando una versión con: {}", "ito commit -m \"Mensaje\"".cyan());
-                                        } else if let Ok(content) = std::fs::read_to_string(&history_path) {
-                                            let history: ito::History = toml::from_str(&content).unwrap_or_default();
-                                            if history.commits.is_empty() {
-                                                println!("\n{}", "No hay ningún commit registrado en este repositorio todavía.".yellow());
-                                            } else {
-                                                println!("\n{}", "Historial de Revisiones de Hardware".bold());
-                                                println!("------------------------------------------------------------");
-                                                for commit in history.commits.iter().rev() {
-                                                    let short_hash = if commit.hash.len() > 8 { &commit.hash[..8] } else { &commit.hash };
-                                                    println!("Commit:  {}", short_hash.cyan().bold());
-                                                    println!("Fecha:   {}", commit.timestamp.dimmed());
-                                                    println!("Mensaje: {}", commit.message.bold());
-                                                    println!("------------------------------------------------------------");
-                                                }
-                                            }
-                                        }
-                                    }
-                                    "7" => {
-                                        break;
-                                    }
-                                    "8" => {
-                                        println!("\n¡Hasta luego!");
-                                        std::process::exit(0);
-                                    }
-                                    _ => {
-                                        println!("{}", "Opción inválida. Intente de nuevo.".yellow());
+                                    Err(err) => {
+                                        println!("\nError al vincular: {}", err.red().bold());
                                     }
                                 }
+                            } else if menu_input_lower == "6" || menu_input_lower == "history" || menu_input_lower == "historial" {
+                                let history_path = chosen_project.path.join(".ito").join("history.toml");
+                                if !history_path.exists() {
+                                    println!("\n{}", "No hay ningún commit registrado en este repositorio todavía.".yellow());
+                                    println!("Comienza guardando una versión con: {}", "ito commit -m \"Mensaje\"".cyan());
+                                } else if let Ok(content) = std::fs::read_to_string(&history_path) {
+                                    let history: ito::History = toml::from_str(&content).unwrap_or_default();
+                                    if history.commits.is_empty() {
+                                        println!("\n{}", "No hay ningún commit registrado en este repositorio todavía.".yellow());
+                                    } else {
+                                        println!("\n{}", "Historial de Revisiones de Hardware".bold());
+                                        println!("------------------------------------------------------------");
+                                        for commit in history.commits.iter().rev() {
+                                            let short_hash = if commit.hash.len() > 8 { &commit.hash[..8] } else { &commit.hash };
+                                            println!("Commit:  {}", short_hash.cyan().bold());
+                                            println!("Fecha:   {}", commit.timestamp.dimmed());
+                                            println!("Mensaje: {}", commit.message.bold());
+                                            println!("------------------------------------------------------------");
+                                        }
+                                    }
+                                }
+                            } else if menu_input_lower == "7" || menu_input_lower == "volver" || menu_input_lower == "atras" || menu_input_lower == "back" {
+                                break;
+                            } else if menu_input_lower == "8" || menu_input_lower == "salir" || menu_input_lower == "exit" || menu_input_lower == "quit" || menu_input_lower == "q" {
+                                println!("\n¡Hasta luego!");
+                                std::process::exit(0);
+                            } else {
+                                println!("{}", "Opción inválida. Intente de nuevo.".yellow());
                             }
                         }
+                    } else {
+                        println!("{}", "Número o nombre de proyecto inválido. Intente de nuevo.".yellow());
                     }
-                    println!("{}", "Número inválido. Intente de nuevo.".yellow());
                 }
             }
         }
@@ -1288,13 +1338,13 @@ async fn main() -> Result<()> {
                     println!("{}", "Error al leer la opción.".red());
                     std::process::exit(1);
                 }
-                match option.trim() {
-                    "1" => break ("firmware", "Firmware"),
-                    "2" => break ("electronics", "Electrónica"),
-                    "3" => break ("mechanical", "Mecánica"),
-                    "4" => break ("documentation", "Documentación"),
-                    "5" => break ("manufacturing", "Manufactura"),
-                    "6" => {
+                match option.trim().to_lowercase().as_str() {
+                    "1" | "firmware" => break ("firmware", "Firmware"),
+                    "2" | "electrónica" | "electronica" | "electronics" => break ("electronics", "Electrónica"),
+                    "3" | "mecánica" | "mecanica" | "mechanical" => break ("mechanical", "Mecánica"),
+                    "4" | "documentación" | "documentacion" | "documentation" => break ("documentation", "Documentación"),
+                    "5" | "manufactura" | "manufacturing" => break ("manufacturing", "Manufactura"),
+                    "6" | "volver" | "atras" | "back" => {
                         println!("{}", "Vinculación cancelada.".yellow());
                         return Ok(());
                     }
@@ -1465,10 +1515,19 @@ async fn main() -> Result<()> {
                             println!("{}", "Error al leer la opción.".red());
                             std::process::exit(1);
                         }
-                        let option = option.trim();
-                        if let Ok(idx) = option.parse::<usize>() {
+                        let option_trimmed = option.trim().to_lowercase();
+                        if let Ok(idx) = option_trimmed.parse::<usize>() {
                             if idx > 0 && idx <= modules.len() {
                                 let (k, n) = modules[idx - 1];
+                                break (k.to_string(), n.to_string());
+                            }
+                        } else {
+                            let matched = modules.iter().find(|(k, n)| {
+                                *k == option_trimmed || 
+                                n.to_lowercase() == option_trimmed ||
+                                option_trimmed.starts_with(&k[..3])
+                            });
+                            if let Some((k, n)) = matched {
                                 break (k.to_string(), n.to_string());
                             }
                         }
@@ -1597,3 +1656,47 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+fn parse_shell_words(s: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_double_quotes = false;
+    let mut in_single_quotes = false;
+    let mut chars = s.chars().peekable();
+    
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if !in_single_quotes => {
+                in_double_quotes = !in_double_quotes;
+            }
+            '\'' if !in_double_quotes => {
+                in_single_quotes = !in_single_quotes;
+            }
+            '\\' => {
+                if let Some(next_c) = chars.peek() {
+                    if *next_c == '"' || *next_c == '\'' || *next_c == '\\' {
+                        word.push(chars.next().unwrap());
+                    } else {
+                        word.push('\\');
+                    }
+                } else {
+                    word.push('\\');
+                }
+            }
+            c if c.is_whitespace() && !in_double_quotes && !in_single_quotes => {
+                if !word.is_empty() {
+                    words.push(word);
+                    word = String::new();
+                }
+            }
+            c => {
+                word.push(c);
+            }
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
