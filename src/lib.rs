@@ -393,33 +393,27 @@ pub fn run_new(cwd: std::path::PathBuf, project_name: &str) -> Result<(std::path
     std::fs::write(&readme_path, readme_content)
         .map_err(|e| format!("Error al escribir README.md: {}", e))?;
 
-    // 5. Generar archivo LICENSE (MIT por defecto)
-    let license_path = project_dir.join("LICENSE");
-    let current_year = chrono::Utc::now().format("%Y").to_string();
-    let license_content = format!(
-        "MIT License\n\n\
-         Copyright (c) {} {}\n\n\
-         Permission is hereby granted, free of charge, to any person obtaining a copy\n\
-         of this software and associated documentation files (the \"Software\"), to deal\n\
-         in the Software without restriction, including without limitation the rights\n\
-         to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n\
-         copies of the Software, and to permit persons to whom the Software is\n\
-         furnished to do so, subject to the following conditions:\n\n\
-         The above copyright notice and this permission notice shall be included in all\n\
-         copies or substantial portions of the Software.\n\n\
-         THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n\
-         IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n\
-         FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n\
-         AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n\
-         LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n\
-         OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n\
-         SOFTWARE.\n",
-        current_year, config.created_by
-    );
-    std::fs::write(&license_path, license_content)
-        .map_err(|e| format!("Error al escribir LICENSE: {}", e))?;
-
     Ok((project_dir, project_uuid))
+}
+
+
+fn load_manifest(project_dir: &std::path::Path) -> std::collections::HashSet<String> {
+    let manifest_path = project_dir.join(".ito").join("manifest.json");
+    if manifest_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+            if let Ok(manifest) = serde_json::from_str::<std::collections::HashSet<String>>(&content) {
+                return manifest;
+            }
+        }
+    }
+    std::collections::HashSet::new()
+}
+
+fn save_manifest(project_dir: &std::path::Path, manifest: &std::collections::HashSet<String>) {
+    let manifest_path = project_dir.join(".ito").join("manifest.json");
+    if let Ok(content) = serde_json::to_string_pretty(manifest) {
+        let _ = std::fs::write(&manifest_path, content);
+    }
 }
 
 pub fn get_default_workspace_path() -> Result<std::path::PathBuf, String> {
@@ -1268,6 +1262,8 @@ pub fn create_project_zip(project_dir: &std::path::Path) -> std::result::Result<
         let options = zip::write::FileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
 
+        let mut tracked_files = std::collections::HashSet::new();
+
         fn walk_and_zip_dir(
             dir: &std::path::Path,
             base_dir: &std::path::Path,
@@ -1277,6 +1273,7 @@ pub fn create_project_zip(project_dir: &std::path::Path) -> std::result::Result<
             options: zip::write::FileOptions,
             links: &std::collections::HashMap<String, models::ItoProjectLink>,
             is_root_walk: bool,
+            tracked_files: &mut std::collections::HashSet<String>,
         ) -> std::result::Result<(), String> {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
@@ -1295,7 +1292,7 @@ pub fn create_project_zip(project_dir: &std::path::Path) -> std::result::Result<
                             continue;
                         }
 
-                        walk_and_zip_dir(&path, base_dir, prefix_in_zip, filter, zip, options, links, is_root_walk)?;
+                        walk_and_zip_dir(&path, base_dir, prefix_in_zip, filter, zip, options, links, is_root_walk, tracked_files)?;
                     } else if path.is_file() {
                         let rel_str = relative_path.to_string_lossy().replace('\\', "/");
                         let file_name_in_zip = if prefix_in_zip.is_empty() {
@@ -1311,13 +1308,15 @@ pub fn create_project_zip(project_dir: &std::path::Path) -> std::result::Result<
                             .map_err(|e| format!("Error al leer archivo {}: {}", path.display(), e))?;
                         zip.write_all(&content)
                             .map_err(|e| format!("Error al escribir archivo en zip: {}", e))?;
+                        
+                        tracked_files.insert(file_name_in_zip);
                     }
                 }
             }
             Ok(())
         }
 
-        walk_and_zip_dir(project_dir, project_dir, "", &filter, &mut zip, options, &links, true)?;
+        walk_and_zip_dir(project_dir, project_dir, "", &filter, &mut zip, options, &links, true, &mut tracked_files)?;
 
         for (module_name, link) in &links {
             let raw_path = std::path::Path::new(&link.path);
@@ -1329,12 +1328,14 @@ pub fn create_project_zip(project_dir: &std::path::Path) -> std::result::Result<
 
             if external_path.exists() && external_path.is_dir() {
                 let ext_filter = ignore::IgnoreFilter::new(&external_path);
-                walk_and_zip_dir(&external_path, &external_path, module_name, &ext_filter, &mut zip, options, &links, false)?;
+                walk_and_zip_dir(&external_path, &external_path, module_name, &ext_filter, &mut zip, options, &links, false, &mut tracked_files)?;
             }
         }
 
         zip.finish()
             .map_err(|e| format!("Error al finalizar archivo zip: {}", e))?;
+
+        save_manifest(project_dir, &tracked_files);
     }
     Ok(buffer)
 }
@@ -1524,6 +1525,9 @@ pub async fn run_pull(project_dir: std::path::PathBuf) -> std::result::Result<St
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))
         .map_err(|e| format!("Error al abrir archivo ZIP: {}", e))?;
 
+    let old_manifest = load_manifest(&project_dir);
+    let mut new_manifest = std::collections::HashSet::new();
+
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)
             .map_err(|e| format!("Error al leer entrada del ZIP: {}", e))?;
@@ -1532,7 +1536,8 @@ pub async fn run_pull(project_dir: std::path::PathBuf) -> std::result::Result<St
             None => continue,
         };
 
-        if file.name().ends_with('/') {
+        let file_name = file.name().to_string();
+        if file_name.ends_with('/') {
             std::fs::create_dir_all(&outpath).ok();
         } else {
             if let Some(p) = outpath.parent() {
@@ -1542,8 +1547,30 @@ pub async fn run_pull(project_dir: std::path::PathBuf) -> std::result::Result<St
                 .map_err(|e| format!("Error al crear archivo local: {}", e))?;
             std::io::copy(&mut file, &mut outfile)
                 .map_err(|e| format!("Error al escribir archivo: {}", e))?;
+            
+            let rel_path = file_name.replace('\\', "/");
+            new_manifest.insert(rel_path);
         }
     }
+
+    for rel_path in &old_manifest {
+        if !new_manifest.contains(rel_path) {
+            let file_to_delete = project_dir.join(rel_path);
+            if file_to_delete.exists() && file_to_delete.is_file() {
+                let _ = std::fs::remove_file(&file_to_delete);
+                println!("Eliminado archivo local obsoleto: {}", rel_path);
+            }
+        }
+    }
+
+    // Caso especial de transición para versión 0.3.3: Si LICENSE existe localmente pero no en el ZIP (servidor), lo removemos
+    let license_file = project_dir.join("LICENSE");
+    if !new_manifest.contains("LICENSE") && license_file.exists() && license_file.is_file() {
+        let _ = std::fs::remove_file(&license_file);
+        println!("Eliminado archivo local obsoleto: LICENSE");
+    }
+
+    save_manifest(&project_dir, &new_manifest);
 
     let mut electronics_path = project_dir.clone();
     let ito_json_path = project_dir.join("ito.json");
@@ -1835,7 +1862,6 @@ mod tests {
         // Verificar archivos
         assert!(project_path.join("ito.json").is_file());
         assert!(project_path.join("README.md").is_file());
-        assert!(project_path.join("LICENSE").is_file());
         
         // Intentar crear el mismo proyecto de nuevo debe dar error
         let err_res = run_new(temp_dir.clone(), project_name);
@@ -2235,4 +2261,64 @@ mod tests {
         // Limpiar
         std::fs::remove_dir_all(&temp_dir).ok();
     }
+
+    #[test]
+    fn test_manifest_file_deletion_tracking() {
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-test-manifest-{}", unique_id));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // 1. Crear la subcarpeta .ito para simular el proyecto
+        std::fs::create_dir_all(temp_dir.join(".ito")).unwrap();
+
+        // 2. Crear archivos simulados en el directorio del proyecto
+        let file1_path = temp_dir.join("file1.txt");
+        let file2_path = temp_dir.join("file2.txt");
+        std::fs::write(&file1_path, "Content 1").unwrap();
+        std::fs::write(&file2_path, "Content 2").unwrap();
+
+        assert!(file1_path.exists());
+        assert!(file2_path.exists());
+
+        // 3. Guardar el manifiesto con ambos archivos
+        let mut old_manifest = std::collections::HashSet::new();
+        old_manifest.insert("file1.txt".to_string());
+        old_manifest.insert("file2.txt".to_string());
+        save_manifest(&temp_dir, &old_manifest);
+
+        // 4. Verificar que se cargue correctamente
+        let loaded = load_manifest(&temp_dir);
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.contains("file1.txt"));
+        assert!(loaded.contains("file2.txt"));
+
+        // 5. Simular la extracción de un ZIP que contiene sólo file1.txt (eliminamos file2.txt del manifiesto)
+        let mut new_manifest = std::collections::HashSet::new();
+        new_manifest.insert("file1.txt".to_string());
+
+        // Ejecutar lógica de limpieza (similar a la que está en run_pull)
+        for rel_path in &loaded {
+            if !new_manifest.contains(rel_path) {
+                let file_to_delete = temp_dir.join(rel_path);
+                if file_to_delete.exists() && file_to_delete.is_file() {
+                    let _ = std::fs::remove_file(&file_to_delete);
+                }
+            }
+        }
+
+        // 6. Verificar que file2.txt haya sido eliminado y file1.txt siga existiendo
+        assert!(file1_path.exists());
+        assert!(!file2_path.exists());
+
+        // Guardar el nuevo manifiesto y verificar
+        save_manifest(&temp_dir, &new_manifest);
+        let loaded_new = load_manifest(&temp_dir);
+        assert_eq!(loaded_new.len(), 1);
+        assert!(loaded_new.contains("file1.txt"));
+        assert!(!loaded_new.contains("file2.txt"));
+
+        // Limpiar
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
 }
+
