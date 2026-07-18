@@ -37,6 +37,12 @@ Para optimizar el almacenamiento local y la sincronización con servidores, ITO 
 *   Los objetos se guardan estructurados en `.ito/objects/`.
 *   **Deduplicación Total**: Si múltiples módulos o versiones sucesivas contienen archivos idénticos (como modelos 3D pesados), estos se guardan una única vez física en disco, referenciándose mediante manifiestos de proyecto.
 
+### Integridad del Historial y Restauración Segura
+El motor está diseñado para que cada versión sea verificable y las restauraciones no pierdan trabajo:
+*   **Identidad por contenido (árbol Merkle)**: El ID de cada commit se deriva de un hash del *contenido real* de todos los módulos (más el commit padre, mensaje y timestamp), no de un resumen de texto. Esto hace la detección de cambios fiable (sin falsos "no hay cambios") y las versiones reproducibles y resistentes a colisiones.
+*   **Restauración atómica y no destructiva**: `ito restore` verifica que todos los objetos existan en el CAS antes de tocar el disco, restaura archivo por archivo de forma atómica (temporal + `rename`) y **nunca elimina archivos no rastreados** del usuario.
+*   **Escritura atómica de metadatos**: El historial (`.ito/history.toml`) se escribe con la técnica temporal + `rename` para no corromperse ante un corte inesperado.
+
 ### Motor de Exclusiones Inteligente (`.itoignore`)
 Filtrado automático de archivos y carpetas pesadas/temporales de compilación para resguardar únicamente el diseño fuente de la disciplina:
 *   **Exclusiones por defecto**: Directorios de compilación y dependencias (`.git`, `.ito`, `.pio`, `target`, `node_modules`, `.venv`, `bin`, `obj`, `.vs`, `history`), bloqueos de CAD (`.lck`), archivos temporales de Office/SolidWorks (`~$*`, `.~*`), `*.tmp`, respaldos `*.bak`, y respaldos/estado de sesión de Proteus (`Project Backups/`, `*.pdsbak`, `*.workspace`).
@@ -74,10 +80,11 @@ El uso de la CLI está estructurado con base en estándares de comandos de Git y
 
 ## 3. Linter Eléctrico: Reglas de Diseño Semántico (ERC)
 
-El comando `ito lint` realiza auditorías de integridad de circuitos buscando las siguientes fallas comunes:
-1.  **Entradas Flotantes (Floating Inputs)**: Pines de tipo entrada que carecen de conexión a una señal o red eléctrica.
-2.  **Cortocircuitos de Salidas (Output Short-Circuits)**: Dos o más pines de tipo salida configurados directamente en la misma red de circuito.
-3.  **Redes Huérfanas (Single-pin Nets)**: Redes eléctricas conectadas a un único pin en todo el esquemático.
+El comando `ito lint` realiza auditorías de integridad de circuitos con las siguientes reglas (código y severidad):
+1.  **`E001_FLOATING_INPUT`** (Advertencia): Pines de tipo entrada (`Input`) sin conexión a ninguna red eléctrica.
+2.  **`E002_NO_DRIVER_NET`** (Advertencia): Redes con entradas conectadas pero sin ningún emisor de señal (salida, pasivo o bidireccional) que las alimente.
+3.  **`E003_UNCONNECTED_POWER`** (Advertencia): Pines de alimentación (`PowerInput`) sin conectar en circuitos integrados.
+4.  **`E004_OUTPUT_SHORT`** (Crítico): Dos o más pines de salida conectados en la misma red, provocando un cortocircuito por conflicto de salidas.
 
 ---
 
