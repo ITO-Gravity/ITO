@@ -28,7 +28,7 @@ A diferencia de los sistemas de control de versiones tradicionales como Git, que
 
 ### Motores de Versionado Semántico Integrados
 *   **`GitEngine` (Firmware)**: Enlaza de manera inteligente el repositorio Git nativo de tu firmware a la transacción de ITO, registrando el hash del commit actual en los metadatos de ITO sin duplicar el código.
-*   **`SemanticCadEngine` (Electrónica)**: Extrae de forma semántica la Netlist de circuitos integrados (KiCad, Altium, Eagle) para reportar diferencias lógicas en componentes (cambios de footprints, valores) y conexiones (nets), omitiendo diferencias de visualización del editor.
+*   **`SemanticCadEngine` (Electrónica)**: Extrae de forma semántica el diseño de circuitos (KiCad, Eagle, EDIF y Proteus) para reportar diferencias lógicas en componentes (cambios de footprints, valores) y conexiones (nets), omitiendo diferencias de visualización del editor. El soporte de **Proteus** (`.pdsprj`) lee componentes, valores y footprints directamente del proyecto, sin exportar netlist a mano (extracción de nets en desarrollo).
 *   **`FileHashEngine` (Mecánica, Documentación, Manufactura)**: Motor optimizado para procesar árboles completos de planos mecánicos (STEP, SolidWorks), PDFs y archivos de fabricación pesados.
 
 ### Almacenamiento CAS (Content-Addressable Storage) con Deduplicación
@@ -39,7 +39,7 @@ Para optimizar el almacenamiento local y la sincronización con servidores, ITO 
 
 ### Motor de Exclusiones Inteligente (`.itoignore`)
 Filtrado automático de archivos y carpetas pesadas/temporales de compilación para resguardar únicamente el diseño fuente de la disciplina:
-*   **Exclusiones por defecto**: Directorios de compilación y dependencias (`.git`, `.ito`, `.pio`, `target`, `node_modules`, `.venv`, `bin`, `obj`, `.vs`, `history`), bloqueos de CAD (`.lck`), archivos temporales de Office/SolidWorks (`~$*`, `.~*`), `*.tmp` y respaldos `*.bak`.
+*   **Exclusiones por defecto**: Directorios de compilación y dependencias (`.git`, `.ito`, `.pio`, `target`, `node_modules`, `.venv`, `bin`, `obj`, `.vs`, `history`), bloqueos de CAD (`.lck`), archivos temporales de Office/SolidWorks (`~$*`, `.~*`), `*.tmp`, respaldos `*.bak`, y respaldos/estado de sesión de Proteus (`Project Backups/`, `*.pdsbak`, `*.workspace`).
 
 ---
 
@@ -101,7 +101,7 @@ ITO cuenta con un actualizador automático integrado conectado a GitHub Releases
 # Comprobar la compilación de la biblioteca y ejecutable
 cargo check
 
-# Ejecutar la suite de pruebas unitarias e integrales (23 tests)
+# Ejecutar la suite de pruebas unitarias e integrales (31 tests)
 cargo test
 
 # Instalar globalmente el ejecutable de ITO en el sistema
