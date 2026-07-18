@@ -31,6 +31,11 @@ pub struct DiffSummary {
 pub struct CommitEntry {
     pub hash: String,
     pub parent_hash: String,
+    /// Merkle del contenido real de todos los módulos en este commit. Identifica el ESTADO del
+    /// proyecto (independiente de mensaje/timestamp) y se usa para detectar cambios de forma fiable.
+    /// `#[serde(default)]` mantiene compatibilidad con historiales creados antes de este campo.
+    #[serde(default)]
+    pub tree_hash: String,
     pub message: String,
     pub timestamp: String,
     pub zip_path: String,
@@ -44,6 +49,24 @@ pub struct CommitEntry {
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize, Clone)]
 pub struct History {
     pub commits: Vec<CommitEntry>,
+}
+
+/// Escribe un archivo de forma atómica: primero a un temporal en el MISMO directorio (mismo volumen,
+/// para que el rename sea atómico) y luego lo renombra sobre el destino. Evita que un crash a mitad
+/// de escritura deje metadatos críticos (p. ej. history.toml) truncados o corruptos.
+pub fn write_atomic(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let base = path.file_name().and_then(|n| n.to_str()).unwrap_or("ito");
+    let tmp = dir.join(format!(".{}.tmp-{}", base, uuid::Uuid::new_v4()));
+    std::fs::write(&tmp, contents)?;
+    // En Windows, std::fs::rename reemplaza el destino existente de forma atómica (MoveFileEx).
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp); // no dejar temporales huérfanos si falla
+            Err(e)
+        }
+    }
 }
 
 pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> Result<CommitEntry, String> {
@@ -110,37 +133,24 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
         ));
     }
 
-    // 2. Generar el hash de estado unificado combinando los metadatos de todos los módulos
-    let mut state_hasher = Sha256::new();
-    if let Some(ref msg) = message {
-        state_hasher.update(msg.as_bytes());
-    }
+    // 2. Calcular el tree_hash: Merkle del CONTENIDO real de todos los módulos.
+    //    A diferencia del esquema anterior (que hasheaba el texto del resumen del diff), este id
+    //    es un compromiso criptográfico del estado de los archivos, por lo que dos ediciones
+    //    distintas nunca colisionan y una reedición del mismo archivo siempre se detecta.
+    let mut modules_for_tree: Vec<&(String, std::path::PathBuf, String)> = active_modules.iter().collect();
+    modules_for_tree.sort_by(|a, b| a.0.cmp(&b.0));
 
-    for (key, module_path, engine_name) in &active_modules {
-        state_hasher.update(key.as_bytes());
-        state_hasher.update(engine_name.as_bytes());
-        
-        let m_cache_dir = project_dir.join(".ito").join("cache").join(key);
-        let engine = registry.get_engine(engine_name).unwrap_or_else(|| registry.get_engine("file-hash").unwrap());
-        
-        match engine.status(module_path, &m_cache_dir) {
-            Ok(engines::ModuleStatus::Modified { summary, details }) => {
-                state_hasher.update(summary.as_bytes());
-                for d in details {
-                    state_hasher.update(d.as_bytes());
-                }
-            }
-            Ok(engines::ModuleStatus::Unchanged) => {
-                state_hasher.update(b"unchanged");
-            }
-            _ => {
-                state_hasher.update(b"error");
-            }
-        }
+    let mut tree_hasher = Sha256::new();
+    for (key, module_path, engine_name) in &modules_for_tree {
+        let content_id = engines::compute_module_content_id(engine_name, module_path);
+        tree_hasher.update(key.as_bytes());
+        tree_hasher.update(b"\0");
+        tree_hasher.update(engine_name.as_bytes());
+        tree_hasher.update(b"\0");
+        tree_hasher.update(content_id.as_bytes());
+        tree_hasher.update(b"\n");
     }
-
-    let hash_result = state_hasher.finalize();
-    let hash_str = format!("{:x}", hash_result);
+    let tree_hash = format!("{:x}", tree_hasher.finalize());
 
     // 3. Cargar historial local
     let history_path = project_dir.join(".ito").join("history.toml");
@@ -158,9 +168,29 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
         .map(|c| c.hash.clone())
         .unwrap_or_else(|| "0000000000000000000000000000000000000000000000000000000000000000".to_string());
 
-    if hash_str == parent_hash {
-        return Err("No hay cambios pendientes en ningún módulo para confirmar.".to_string());
+    // Detección de cambios por CONTENIDO: si el estado actual es idéntico al del último commit
+    // (mismo tree_hash), no hay nada que confirmar. Los commits legados sin tree_hash (campo vacío)
+    // no bloquean el commit para no perder la capacidad de versionar en repos antiguos.
+    if let Some(last) = history.commits.last() {
+        if !last.tree_hash.is_empty() && last.tree_hash == tree_hash {
+            return Err("No hay cambios pendientes en ningún módulo para confirmar.".to_string());
+        }
     }
+
+    // El id del commit es un hash del estado (tree) + el padre + mensaje + timestamp; así dos commits
+    // con el mismo contenido pero distinto momento/padre son entradas distintas (como en git).
+    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut commit_hasher = Sha256::new();
+    commit_hasher.update(tree_hash.as_bytes());
+    commit_hasher.update(b"\0");
+    commit_hasher.update(parent_hash.as_bytes());
+    commit_hasher.update(b"\0");
+    if let Some(ref msg) = message {
+        commit_hasher.update(msg.as_bytes());
+    }
+    commit_hasher.update(b"\0");
+    commit_hasher.update(timestamp.as_bytes());
+    let hash_str = format!("{:x}", commit_hasher.finalize());
 
     // 4. Ejecutar commits en cada motor activo
     let mut modules_payload = std::collections::HashMap::new();
@@ -171,19 +201,38 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
         let m_backup_dir = project_dir.join(".ito").join("backups").join(&hash_str).join(&key);
         let m_cache_dir = project_dir.join(".ito").join("cache").join(&key);
         
-        // Calcular diff_summary antes de actualizar la caché si es electrónica
+        // Calcular diff_summary antes de actualizar la caché si es electrónica.
+        // El contenido siempre se versiona (el tree_hash es de bytes); pero si el CAD EXISTE y no
+        // parsea, no reportamos un diff semántico engañoso (falsas "eliminaciones"): dejamos None.
         let diff_summary_val = if key == "electronics" {
             let old_design = parsers::parse_project_directory(&m_cache_dir).unwrap_or_else(|_| models::HardwareDesign::new());
-            let new_design = parsers::parse_project_directory(&module_path).unwrap_or_else(|_| models::HardwareDesign::new());
-            let diff_result = diff::diff_designs(&old_design, &new_design);
-            Some(DiffSummary {
-                added_components: diff_result.components.added.len(),
-                deleted_components: diff_result.components.deleted.len(),
-                modified_components: diff_result.components.modified.len(),
-                added_nets: diff_result.nets.added.len(),
-                deleted_nets: diff_result.nets.deleted.len(),
-                modified_nets: diff_result.nets.modified.len(),
-            })
+            match parsers::parse_project_directory(&module_path) {
+                Ok(new_design) => {
+                    let diff_result = diff::diff_designs(&old_design, &new_design);
+                    Some(DiffSummary {
+                        added_components: diff_result.components.added.len(),
+                        deleted_components: diff_result.components.deleted.len(),
+                        modified_components: diff_result.components.modified.len(),
+                        added_nets: diff_result.nets.added.len(),
+                        deleted_nets: diff_result.nets.deleted.len(),
+                        modified_nets: diff_result.nets.modified.len(),
+                    })
+                }
+                // Hay un archivo de diseño pero está corrupto/no soportado: sin resumen semántico.
+                Err(_) if parsers::has_design_source(&module_path) => None,
+                // No hay diseño de electrónica: comparar contra vacío es válido.
+                Err(_) => {
+                    let diff_result = diff::diff_designs(&old_design, &models::HardwareDesign::new());
+                    Some(DiffSummary {
+                        added_components: diff_result.components.added.len(),
+                        deleted_components: diff_result.components.deleted.len(),
+                        modified_components: diff_result.components.modified.len(),
+                        added_nets: diff_result.nets.added.len(),
+                        deleted_nets: diff_result.nets.deleted.len(),
+                        modified_nets: diff_result.nets.modified.len(),
+                    })
+                }
+            }
         } else {
             None
         };
@@ -197,17 +246,19 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
         modules_payload.insert(key, payload);
     }
 
-    // 5. Guardar commit en el historial
-    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    // 5. Guardar commit en el historial (el `timestamp` ya se fijó en el paso 3 para que coincida
+    //    con el usado al derivar el id del commit).
     let commit_msg = message.unwrap_or_else(|| "Respaldo local del proyecto".to_string());
 
     let commit_entry = CommitEntry {
         hash: hash_str.clone(),
         parent_hash: parent_hash.clone(),
+        tree_hash,
         message: commit_msg,
         timestamp,
         zip_path: format!(".ito/backups/{}", hash_str),
-        synced: true,
+        // Un commit local recién creado aún no está en el servidor; `push` lo marcará como sincronizado.
+        synced: false,
         diff_summary,
         modules: modules_payload,
     };
@@ -215,7 +266,7 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
     history.commits.push(commit_entry.clone());
     let history_str = toml::to_string_pretty(&history)
         .map_err(|e| format!("Error al serializar historial: {}", e))?;
-    std::fs::write(&history_path, history_str)
+    write_atomic(&history_path, &history_str)
         .map_err(|e| format!("Error al escribir historial: {}", e))?;
 
     Ok(commit_entry)
@@ -1147,6 +1198,41 @@ pub fn run_auth_login(project_dir: std::path::PathBuf, token: &str) -> std::resu
     Ok(())
 }
 
+/// Resuelve la carpeta física del módulo de electrónica igual que `run_commit`:
+/// 1) por link en ito.json, 2) carpeta `electronics/` local, 3) fallback a la raíz del proyecto.
+/// Se usa para que `ito diff` (y otros) miren el mismo lugar que se versiona.
+pub fn resolve_electronics_dir(project_dir: &std::path::Path) -> std::path::PathBuf {
+    let ito_json_path = project_dir.join("ito.json");
+    if let Ok(content) = std::fs::read_to_string(&ito_json_path) {
+        if let Ok(config) = serde_json::from_str::<models::ItoProjectConfig>(&content) {
+            let has_links = config.links.as_ref().map(|l| !l.is_empty()).unwrap_or(false);
+            if has_links {
+                if let Some(links) = &config.links {
+                    if let Some(link) = links.get("electronics") {
+                        let raw_path = std::path::PathBuf::from(&link.path);
+                        let resolved = if raw_path.is_absolute() {
+                            raw_path
+                        } else {
+                            project_dir.join(raw_path)
+                        };
+                        if resolved.exists() {
+                            return resolved;
+                        }
+                    }
+                }
+                let local_electronics = project_dir.join("electronics");
+                if local_electronics.is_dir() {
+                    return local_electronics;
+                }
+            }
+            // Sin links (o electrónica no resuelta): la electrónica es la raíz, igual que el
+            // fallback de run_commit.
+            return project_dir.to_path_buf();
+        }
+    }
+    project_dir.to_path_buf()
+}
+
 pub fn get_latest_design_json(project_dir: &std::path::Path) -> std::result::Result<(String, Option<String>), String> {
     let mut target_dir = None;
 
@@ -1191,8 +1277,20 @@ pub fn get_latest_design_json(project_dir: &std::path::Path) -> std::result::Res
     // 4. Fallback final al raíz del proyecto
     let target_dir = target_dir.unwrap_or_else(|| project_dir.to_path_buf());
 
-    let design = parsers::parse_project_directory(&target_dir)
-        .unwrap_or_else(|_| models::HardwareDesign::new());
+    // No tratar un CAD corrupto como diseño vacío: si HAY un archivo de diseño pero no se puede
+    // parsear, abortar en vez de sobrescribir la vista semántica del servidor con datos vacíos.
+    let design = match parsers::parse_project_directory(&target_dir) {
+        Ok(d) => d,
+        Err(e) => {
+            if parsers::has_design_source(&target_dir) {
+                return Err(format!(
+                    "El diseño de electrónica en '{}' existe pero no se pudo parsear (¿archivo corrupto o formato no soportado?): {}. Se aborta el envío para no sobrescribir el diseño del servidor con datos vacíos.",
+                    target_dir.display(), e
+                ));
+            }
+            models::HardwareDesign::new()
+        }
+    };
 
     let design_json = serde_json::to_string(&design)
         .map_err(|e| format!("Error al serializar el diseño a JSON: {}", e))?;
@@ -1412,6 +1510,20 @@ pub async fn run_push(project_dir: std::path::PathBuf) -> std::result::Result<St
         .map_err(|e| format!("Error al leer respuesta del servidor: {}", e))?;
 
     if status.is_success() {
+        // Marcar el commit recién enviado como sincronizado en el historial local (releyendo en
+        // fresco y reescribiendo de forma atómica para no perder cambios concurrentes ni corromper).
+        let pushed_hash = latest_commit.hash.clone();
+        if let Ok(hist_content) = std::fs::read_to_string(&history_path) {
+            if let Ok(mut hist) = toml::from_str::<History>(&hist_content) {
+                if let Some(c) = hist.commits.iter_mut().find(|c| c.hash == pushed_hash) {
+                    c.synced = true;
+                    if let Ok(s) = toml::to_string_pretty(&hist) {
+                        let _ = write_atomic(&history_path, &s);
+                    }
+                }
+            }
+        }
+
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
             if let Some(msg) = json.get("message").and_then(|m| m.as_str()) {
                 return Ok(msg.to_string());
@@ -1648,6 +1760,9 @@ pub async fn run_pull(project_dir: std::path::PathBuf) -> std::result::Result<St
     let commit_entry = CommitEntry {
         hash: version_hash.to_string(),
         parent_hash: parent_hash.to_string(),
+        // Commit descargado del servidor: no recalculamos el tree localmente. Queda vacío (estado
+        // legado seguro); el próximo `ito commit` derivará el tree_hash del contenido real.
+        tree_hash: String::new(),
         message: message.to_string(),
         timestamp,
         zip_path: format!(".ito/backups/{}", version_hash),
@@ -1659,7 +1774,7 @@ pub async fn run_pull(project_dir: std::path::PathBuf) -> std::result::Result<St
     history.commits.push(commit_entry);
     let history_str = toml::to_string_pretty(&history)
         .map_err(|e| format!("Error al serializar historial: {}", e))?;
-    std::fs::write(&history_path, history_str)
+    write_atomic(&history_path, &history_str)
         .map_err(|e| format!("Error al escribir historial: {}", e))?;
 
     Ok(format!("Descargada e integrada versión {} ({})", &version_hash[..8], message))
@@ -2066,6 +2181,105 @@ mod tests {
         assert_eq!(summary2.added_components, 1); // Detecta que se añadió R1!
 
         // Limpiar
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_commit_hash_is_content_based() {
+        // Regresión: antes el id del commit se derivaba del TEXTO del resumen del diff, no del
+        // contenido. Eso causaba un falso "No hay cambios" al reeditar el mismo archivo con el
+        // mismo mensaje. Ahora el tree_hash es del contenido real y debe detectar el cambio.
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-content-hash-{}", unique_id));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let (p_path, _) = run_new(temp_dir.clone(), "ContentProj").unwrap();
+        let cad_path = p_path.join("design.json");
+
+        // Commit 1
+        std::fs::write(&cad_path, r#"{"components":[{"designator":"R1","footprint":"","pins":[]}],"nets":[]}"#).unwrap();
+        let c1 = run_commit(p_path.clone(), Some("mismo mensaje".to_string())).unwrap();
+        assert!(!c1.tree_hash.is_empty());
+
+        // Editar el MISMO archivo a distinto contenido con el MISMO mensaje: antes fallaba.
+        std::fs::write(&cad_path, r#"{"components":[{"designator":"R2","footprint":"","pins":[]}],"nets":[]}"#).unwrap();
+        let c2 = run_commit(p_path.clone(), Some("mismo mensaje".to_string())).unwrap();
+
+        // Distinto contenido -> distinto tree_hash y distinto id, encadenado al padre correcto.
+        assert_ne!(c1.tree_hash, c2.tree_hash, "el tree_hash debe cambiar al cambiar el contenido");
+        assert_ne!(c1.hash, c2.hash);
+        assert_eq!(c2.parent_hash, c1.hash);
+
+        // Un commit sin cambios de contenido (solo cambia el mensaje) debe rechazarse.
+        let c3 = run_commit(p_path.clone(), Some("mensaje diferente".to_string()));
+        assert!(c3.is_err(), "un commit sin cambios reales de contenido debe rechazarse");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_corrupt_design_versions_bytes_without_phantom_diff() {
+        // 0.3: un CAD corrupto NO debe interpretarse como "diseño vacío". Los bytes se versionan
+        // igual (tree_hash de contenido), pero no se reporta un diff semántico engañoso.
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-corrupt-{}", unique_id));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let (p_path, _) = run_new(temp_dir.clone(), "CorruptProj").unwrap();
+        let cad = p_path.join("design.json");
+
+        // Commit 1: diseño válido con R1
+        std::fs::write(&cad, r#"{"components":[{"designator":"R1","footprint":"","pins":[]}],"nets":[]}"#).unwrap();
+        let c1 = run_commit(p_path.clone(), Some("valido".to_string())).unwrap();
+        assert!(c1.diff_summary.is_some());
+
+        // Commit 2: el CAD queda corrupto (JSON inválido). Debe versionar los bytes sin diff falso.
+        std::fs::write(&cad, "{ esto no es json valido").unwrap();
+        let c2 = run_commit(p_path.clone(), Some("corrupto".to_string())).unwrap();
+        assert!(c2.diff_summary.is_none(), "un CAD corrupto no debe producir un diff semántico engañoso");
+        assert_ne!(c1.tree_hash, c2.tree_hash);
+
+        // Restaurar a c1 recupera el JSON válido exacto.
+        run_restore(p_path.clone(), &c1.hash[..8]).unwrap();
+        assert!(std::fs::read_to_string(&cad).unwrap().contains("R1"));
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_restore_preserves_untracked_and_removes_stale() {
+        // Regresión de seguridad: el restore anterior borraba TODO el directorio del módulo antes
+        // de restaurar, eliminando archivos no rastreados del usuario. Ahora debe preservar lo no
+        // rastreado y solo quitar lo que estaba rastreado y no existe en la versión objetivo.
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-restore-safe-{}", unique_id));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let (p_path, _) = run_new(temp_dir.clone(), "SafeProj").unwrap();
+
+        // Módulo mecánico externo (motor file-hash)
+        let mech = temp_dir.join("mech");
+        std::fs::create_dir_all(&mech).unwrap();
+        std::fs::write(mech.join("part.step"), "V1").unwrap();
+        run_link(p_path.clone(), "mechanical", mech.clone()).unwrap();
+
+        // Commit 1: solo part.step
+        let c1 = run_commit(p_path.clone(), Some("c1".to_string())).unwrap();
+
+        // Commit 2: se agrega extra.step (rastreado)
+        std::fs::write(mech.join("extra.step"), "EXTRA").unwrap();
+        let _c2 = run_commit(p_path.clone(), Some("c2".to_string())).unwrap();
+
+        // El usuario crea un archivo NO rastreado (nunca commiteado)
+        std::fs::write(mech.join("notas_personales.txt"), "no borrar").unwrap();
+
+        // Restaurar al commit 1 (donde extra.step no existía)
+        run_restore(p_path.clone(), &c1.hash[..8]).unwrap();
+
+        assert_eq!(std::fs::read_to_string(mech.join("part.step")).unwrap(), "V1");
+        assert!(!mech.join("extra.step").exists(), "un archivo rastreado ausente en el target debe borrarse");
+        assert!(mech.join("notas_personales.txt").exists(), "un archivo NO rastreado nunca debe borrarse");
+
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 

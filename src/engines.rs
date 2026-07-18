@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
+use sha2::{Sha256, Digest};
 use crate::models::{HardwareDesign};
 use crate::ignore::IgnoreFilter;
 use crate::cas;
@@ -140,6 +141,142 @@ fn scan_directory_recursive(
             }
         }
     }
+}
+
+/// Calcula un identificador de contenido determinista para un módulo, SIN efectos secundarios
+/// (no escribe en el CAS ni toca la caché). Es la base del `tree_hash` de un commit: dos estados
+/// con el mismo contenido producen el mismo id, y cualquier cambio real de bytes lo altera.
+///
+/// - Motor `git`: delega en git usando el SHA de `HEAD` (no re-hashea el working tree del código).
+///   Si el directorio no es un repo git válido, cae al escaneo de contenido como respaldo.
+/// - Resto de motores: Merkle simple de los hashes SHA-256 del contenido de cada archivo rastreado
+///   (respetando `.itoignore`), ordenado por ruta para ser determinista.
+pub fn compute_module_content_id(engine_name: &str, path: &Path) -> String {
+    if engine_name == "git" {
+        let output = std::process::Command::new("git")
+            .args(&["rev-parse", "HEAD"])
+            .current_dir(path)
+            .output();
+        if let Ok(out) = output {
+            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !sha.is_empty() {
+                return format!("git:{}", sha);
+            }
+        }
+        // Sin repo git válido: continuar con el escaneo de contenido como respaldo.
+    }
+
+    let filter = IgnoreFilter::new(path);
+    let mut files = Vec::new();
+    scan_directory_recursive(path, path, &filter, &mut files);
+
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for f in files {
+        if let Ok(hash) = cas::calculate_file_hash(&f) {
+            if let Ok(rel) = f.strip_prefix(path) {
+                entries.push((rel.to_string_lossy().to_string().replace('\\', "/"), hash));
+            }
+        }
+    }
+    entries.sort();
+
+    let mut hasher = Sha256::new();
+    for (rel, hash) in entries {
+        hasher.update(rel.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(hash.as_bytes());
+        hasher.update(b"\n");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// Restauración modular SEGURA y transaccional a partir del manifiesto de un commit.
+/// Reglas de seguridad frente a la versión anterior (que borraba TODO el directorio):
+///   1. Verifica que TODOS los objetos del target existan en el CAS antes de tocar el disco;
+///      si falta alguno, aborta sin modificar nada.
+///   2. Restaura cada archivo de forma atómica (temp + rename, vía `cas::restore_file`).
+///   3. Solo elimina archivos que ESTABAN rastreados (según la caché) y ya no están en el target;
+///      nunca borra archivos no rastreados del usuario.
+///   4. Sincroniza la caché al estado restaurado para que `status`/`commit` comparen contra la base
+///      correcta y no reporten cambios espurios.
+fn restore_module_from_manifest(path: &Path, backup_dir: &Path, payload: &CommitPayload) -> Result<(), String> {
+    let manifest_filename = payload.metadata.get("manifest").cloned().unwrap_or_else(|| "manifest.json".to_string());
+    let manifest_path = backup_dir.join(&manifest_filename);
+    if !manifest_path.exists() {
+        return Err(format!("No se encontró el manifiesto de respaldo: {}", manifest_path.display()));
+    }
+
+    let content = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("Error al leer manifiesto: {}", e))?;
+    let target: HashMap<String, String> = serde_json::from_str(&content)
+        .map_err(|e| format!("Error al parsear manifiesto: {}", e))?;
+
+    // Derivar rutas: backup_dir = <root>/.ito/backups/<hash>/<key>
+    let project_root = backup_dir.parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let objects_dir = project_root.join(".ito").join("objects");
+    let key = backup_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let cache_dir = project_root.join(".ito").join("cache").join(key);
+    let cache_manifest_path = cache_dir.join("manifest.json");
+
+    // 1. Verificación de integridad ANTES de modificar el working dir.
+    for (rel, hash) in &target {
+        if !cas::object_exists(hash, &objects_dir) {
+            return Err(format!(
+                "Objeto CAS faltante para '{}' (hash {}). Se aborta la restauración sin modificar archivos.",
+                rel, hash
+            ));
+        }
+    }
+
+    // 2. Conjunto de archivos rastreados actualmente (para borrar solo lo rastreado).
+    let tracked_now: HashMap<String, String> = if cache_manifest_path.exists() {
+        std::fs::read_to_string(&cache_manifest_path).ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+
+    // 3. Restaurar (atómicamente por archivo) todo el target.
+    for (rel, hash) in &target {
+        let dest = path.join(rel);
+        cas::restore_file(hash, &dest, &objects_dir)?;
+    }
+
+    // 4. Eliminar únicamente archivos que estaban rastreados y ya no existen en el target.
+    for rel in tracked_now.keys() {
+        if !target.contains_key(rel) {
+            let stale = path.join(rel);
+            if stale.is_file() {
+                std::fs::remove_file(&stale)
+                    .map_err(|e| format!("Error al eliminar archivo obsoleto '{}': {}", stale.display(), e))?;
+            }
+        }
+    }
+
+    // 5. Sincronizar la caché al estado restaurado.
+    std::fs::create_dir_all(&cache_dir).ok();
+    if let Ok(entries) = std::fs::read_dir(&cache_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() && entry.file_name() != "manifest.json" {
+                std::fs::remove_file(p).ok();
+            }
+        }
+    }
+    for (rel, hash) in &target {
+        let cache_dest = cache_dir.join(rel);
+        cas::restore_file(hash, &cache_dest, &objects_dir).ok();
+    }
+    let manifest_str = serde_json::to_string_pretty(&target).unwrap_or_default();
+    let _ = crate::write_atomic(&cache_manifest_path, &manifest_str);
+
+    Ok(())
 }
 
 // ----------------------------------------------------
@@ -282,33 +419,7 @@ impl Engine for SemanticCadEngine {
     }
 
     fn restore(&self, path: &Path, backup_dir: &Path, payload: &CommitPayload) -> Result<(), String> {
-        let manifest_filename = payload.metadata.get("manifest").cloned().unwrap_or_else(|| "manifest.json".to_string());
-        let manifest_path = backup_dir.join(manifest_filename);
-        if !manifest_path.exists() {
-            return Err(format!("No se encontró el manifiesto de respaldo: {}", manifest_path.display()));
-        }
-
-        let content = std::fs::read_to_string(&manifest_path)
-            .map_err(|e| format!("Error al leer manifiesto: {}", e))?;
-        let hashes: HashMap<String, String> = serde_json::from_str(&content)
-            .map_err(|e| format!("Error al parsear manifiesto: {}", e))?;
-
-        let project_root = self.get_project_root(backup_dir);
-        let objects_dir = project_root.join(".ito").join("objects");
-
-        let filter = IgnoreFilter::new(path);
-        let mut existing_files = Vec::new();
-        scan_directory_recursive(path, path, &filter, &mut existing_files);
-        for file in existing_files {
-            std::fs::remove_file(file).ok();
-        }
-
-        for (rel_path, hash) in hashes {
-            let dest = path.join(rel_path);
-            cas::restore_file(&hash, &dest, &objects_dir)?;
-        }
-
-        Ok(())
+        restore_module_from_manifest(path, backup_dir, payload)
     }
 }
 
@@ -469,33 +580,7 @@ impl Engine for FileHashEngine {
     }
 
     fn restore(&self, path: &Path, backup_dir: &Path, payload: &CommitPayload) -> Result<(), String> {
-        let manifest_filename = payload.metadata.get("manifest").cloned().unwrap_or_else(|| "manifest.json".to_string());
-        let manifest_path = backup_dir.join(manifest_filename);
-        if !manifest_path.exists() {
-            return Err(format!("No se encontró el manifiesto de respaldo: {}", manifest_path.display()));
-        }
-
-        let content = std::fs::read_to_string(&manifest_path)
-            .map_err(|e| format!("Error al leer manifiesto: {}", e))?;
-        let hashes: HashMap<String, String> = serde_json::from_str(&content)
-            .map_err(|e| format!("Error al parsear manifiesto: {}", e))?;
-
-        let project_root = self.get_project_root(backup_dir);
-        let objects_dir = project_root.join(".ito").join("objects");
-
-        let filter = IgnoreFilter::new(path);
-        let mut existing_files = Vec::new();
-        scan_directory_recursive(path, path, &filter, &mut existing_files);
-        for file in existing_files {
-            std::fs::remove_file(file).ok();
-        }
-
-        for (rel_path, hash) in hashes {
-            let dest = path.join(rel_path);
-            cas::restore_file(&hash, &dest, &objects_dir)?;
-        }
-
-        Ok(())
+        restore_module_from_manifest(path, backup_dir, payload)
     }
 }
 

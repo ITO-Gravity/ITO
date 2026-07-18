@@ -1,8 +1,22 @@
 // src/cas.rs
 
-use std::path::{Path};
+use std::path::{Path, PathBuf};
 use std::fs;
 use sha2::{Sha256, Digest};
+
+/// Devuelve la ruta física dentro del CAS donde vive (o viviría) el objeto con este hash.
+pub fn object_path(hash: &str, objects_dir: &Path) -> Option<PathBuf> {
+    if hash.len() < 4 {
+        return None;
+    }
+    Some(objects_dir.join(&hash[0..2]).join(&hash[2..]))
+}
+
+/// Indica si un objeto existe físicamente en el almacén CAS. Se usa para verificar la integridad
+/// ANTES de una restauración, de modo que nunca se modifique el working dir si falta un objeto.
+pub fn object_exists(hash: &str, objects_dir: &Path) -> bool {
+    object_path(hash, objects_dir).map(|p| p.exists()).unwrap_or(false)
+}
 
 /// Calcula el hash SHA-256 de un archivo físico en disco
 pub fn calculate_file_hash(path: &Path) -> Result<String, String> {
@@ -59,8 +73,18 @@ pub fn restore_file(hash: &str, dest_path: &Path, objects_dir: &Path) -> Result<
             .map_err(|e| format!("Error al crear directorios para restaurar {}: {}", parent.display(), e))?;
     }
 
-    fs::copy(&src_file, dest_path)
-        .map_err(|e| format!("Error al restaurar archivo desde CAS ({} -> {}): {}", src_file.display(), dest_path.display(), e))?;
+    // Restauración atómica: copiar a un temporal en el mismo directorio y renombrar sobre el destino.
+    // Evita dejar un archivo a medio escribir si el proceso se interrumpe durante la copia.
+    let file_name = dest_path.file_name().and_then(|n| n.to_str()).unwrap_or("ito");
+    let tmp_path = dest_path.with_file_name(format!(".{}.itotmp-{}", file_name, uuid::Uuid::new_v4()));
+
+    fs::copy(&src_file, &tmp_path)
+        .map_err(|e| format!("Error al restaurar archivo desde CAS ({} -> {}): {}", src_file.display(), tmp_path.display(), e))?;
+
+    if let Err(e) = fs::rename(&tmp_path, dest_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("Error al confirmar restauración de {}: {}", dest_path.display(), e));
+    }
 
     Ok(())
 }

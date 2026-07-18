@@ -288,17 +288,32 @@ async fn main() -> Result<()> {
         }
         Commands::Diff { path, json } => {
             let current_dir = std::env::current_dir()?;
+            // Resolver la raíz del proyecto para no depender del cwd exacto.
+            let root = ito::find_project_root(&current_dir).unwrap_or_else(|| current_dir.clone());
 
-            // 1. Cargar diseño viejo (OLD) desde la caché oculta
-            let cache_dir = current_dir.join(".ito").join("cache");
+            // 1. Cargar diseño viejo (OLD) desde la caché DEL MÓDULO de electrónica (.ito/cache/electronics),
+            //    no desde la raíz de la caché (bug anterior: leía .ito/cache y veía todo como "añadido").
+            let cache_dir = root.join(".ito").join("cache").join("electronics");
             let old_design = if cache_dir.exists() {
                 parsers::parse_project_directory(&cache_dir).unwrap_or_else(|_| models::HardwareDesign::new())
             } else {
                 models::HardwareDesign::new()
             };
 
-            // 2. Cargar diseño nuevo (NEW)
-            let new_design = parsers::parse_project_directory(&current_dir)?;
+            // 2. Cargar diseño nuevo (NEW) desde la carpeta de electrónica resuelta (link/local/raíz),
+            //    igual que lo que versiona run_commit. No asumir diseño vacío si el CAD existe pero falla.
+            let elec_dir = ito::resolve_electronics_dir(&root);
+            let new_design = match parsers::parse_project_directory(&elec_dir) {
+                Ok(d) => d,
+                Err(e) => {
+                    if parsers::has_design_source(&elec_dir) {
+                        use colored::Colorize;
+                        println!("{}", format!("Error: el diseño de electrónica en '{}' existe pero no se pudo parsear: {}", elec_dir.display(), e).red().bold());
+                        std::process::exit(1);
+                    }
+                    models::HardwareDesign::new()
+                }
+            };
 
             // 3. Ejecutar comparación
             let diff_result = diff::diff_designs(&old_design, &new_design);
@@ -401,29 +416,29 @@ async fn main() -> Result<()> {
                             diff::ComponentChange::Mpn { old, new } => {
                                 println!(
                                     "    * MPN cambiado de {} a {}",
-                                    format!("{:?}", old).red(),
-                                    format!("{:?}", new).green()
+                                    old.as_deref().unwrap_or("(vacío)").red(),
+                                    new.as_deref().unwrap_or("(vacío)").green()
                                 );
                             }
                             diff::ComponentChange::Manufacturer { old, new } => {
                                 println!(
                                     "    * Fabricante cambiado de {} a {}",
-                                    format!("{:?}", old).red(),
-                                    format!("{:?}", new).green()
+                                    old.as_deref().unwrap_or("(vacío)").red(),
+                                    new.as_deref().unwrap_or("(vacío)").green()
                                 );
                             }
                             diff::ComponentChange::Value { old, new } => {
                                 println!(
                                     "    * Valor cambiado de {} a {}",
-                                    format!("{:?}", old).red(),
-                                    format!("{:?}", new).green()
+                                    old.as_deref().unwrap_or("(vacío)").red(),
+                                    new.as_deref().unwrap_or("(vacío)").green()
                                 );
                             }
                             diff::ComponentChange::Footprint { old, new } => {
                                 println!(
                                     "    * Footprint cambiado de {} a {}",
-                                    format!("{:?}", old).red(),
-                                    format!("{:?}", new).green()
+                                    old.as_deref().unwrap_or("(vacío)").red(),
+                                    new.as_deref().unwrap_or("(vacío)").green()
                                 );
                             }
                             diff::ComponentChange::PinAdded { pin_id, pin_name } => {

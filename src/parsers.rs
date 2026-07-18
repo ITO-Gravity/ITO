@@ -195,6 +195,32 @@ pub fn parse_project_directory<P: AsRef<Path>>(dir: P) -> Result<HardwareDesign>
     Ok(design)
 }
 
+/// Indica si un directorio contiene un archivo fuente de diseño de hardware reconocible
+/// (CAD nativo o `design.json`). Permite distinguir "no hay diseño" (vacío legítimo) de
+/// "hay un diseño pero no se pudo parsear" (corrupto), para no tratar la corrupción como vacío.
+pub fn has_design_source<P: AsRef<Path>>(dir: P) -> bool {
+    let dir = dir.as_ref();
+    if dir.join("design.json").is_file() {
+        return true;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                    let e = ext.to_lowercase();
+                    if e == "kicad_pcb" || e == "kicad_sch" || e == "brd" || e == "edif" || e == "edf"
+                        || (e == "sch" && !path.to_string_lossy().to_lowercase().contains("bom"))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Parsea un archivo de BOM en formato CSV desde una ruta del sistema.
 pub fn parse_bom_csv<P: AsRef<Path>>(path: P) -> Result<HashMap<String, Component>> {
     let file = File::open(path)?;
