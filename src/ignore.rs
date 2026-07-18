@@ -40,6 +40,7 @@ impl IgnoreFilter {
                 || *seg == "history"
                 || *seg == "__pycache__"
                 || *seg == ".ito"
+                || *seg == "project backups"  // carpeta de respaldos automáticos de Proteus
             {
                 return true;
             }
@@ -59,6 +60,10 @@ impl IgnoreFilter {
                 return true;
             }
             if file_name_lower.ends_with(".tmp") || file_name_lower.ends_with(".bak") {
+                return true;
+            }
+            // Ruido de Proteus: respaldos (.pdsbak) y estado de sesión por máquina/usuario (.workspace)
+            if file_name_lower.ends_with(".pdsbak") || file_name_lower.ends_with(".workspace") {
                 return true;
             }
         }
@@ -95,8 +100,15 @@ mod tests {
         assert!(filter.is_ignored(&PathBuf::from("mechanical/.~housing.sldprt")));
         assert!(filter.is_ignored(&PathBuf::from("mechanical/History/housing_v1.zip")));
         assert!(filter.is_ignored(&PathBuf::from("electronics/project-backups/version1.zip")));
-        
+
         assert!(filter.is_ignored(&PathBuf::from("electronics/project-backups-backups/kicad_pcb")));
+
+        // Ruido de Proteus
+        assert!(filter.is_ignored(&PathBuf::from("electronics/pcb/Project Backups/pruebas [20260718].pdsprj")));
+        assert!(filter.is_ignored(&PathBuf::from("electronics/pcb/pruebas.pdsbak")));
+        assert!(filter.is_ignored(&PathBuf::from("electronics/pcb/pruebas.pdsprj.DESKTOP-X.vaslo.workspace")));
+        // El proyecto Proteus real NO se ignora
+        assert!(!filter.is_ignored(&PathBuf::from("electronics/pcb/pruebas.pdsprj")));
 
         assert!(!filter.is_ignored(&PathBuf::from("firmware/src/main.cpp")));
         assert!(!filter.is_ignored(&PathBuf::from("electronics/main_board.kicad_pcb")));
