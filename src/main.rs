@@ -794,10 +794,22 @@ async fn main() -> Result<()> {
             let critical_count = issues.iter().filter(|i| i.severity == linter::LintSeverity::Critical).count();
             let warning_count = issues.iter().filter(|i| i.severity == linter::LintSeverity::Warning).count();
 
+            // ¿Hay grafo eléctrico para analizar? El ERC necesita pines y/o nets. Si el diseño no
+            // aporta conectividad (p. ej. un formato del que aún solo extraemos componentes), no
+            // podemos afirmar que "está limpio": no había nada que chequear.
+            let total_pins: usize = design.components.values().map(|c| c.pins.len()).sum();
+            let has_electrical_graph = total_pins > 0 || !design.nets.is_empty();
+
             if !*quiet {
                 use colored::Colorize;
                 println!("{}", "=== REGLAS ELÉCTRICAS DE DISEÑO (ERC) ===".bold());
-                if issues.is_empty() {
+                if issues.is_empty() && !has_electrical_graph {
+                    println!("{}", "Sin datos eléctricos (pines/nets) para analizar en este diseño.".yellow().bold());
+                    println!(
+                        "   Se cargaron {} componente(s), pero este formato aún no aporta conectividad, así que el ERC no se ejecutó.",
+                        design.components.len()
+                    );
+                } else if issues.is_empty() {
                     println!("{}", "No se detectó ninguna anomalía en el diseño.".green().bold());
                 } else {
                     for issue in &issues {
