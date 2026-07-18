@@ -97,6 +97,7 @@ pub mod kicad;
 pub mod eagle;
 pub mod excel_bom;
 pub mod edif;
+pub mod proteus;
 
 /// Parsea una lista de materiales (BOM) en formato CSV o Excel.
 pub fn parse_bom<P: AsRef<Path>>(path: P) -> Result<HashMap<String, Component>> {
@@ -121,6 +122,7 @@ pub fn parse_cad<P: AsRef<Path>>(path: P) -> Result<HardwareDesign> {
     match ext.as_str() {
         "kicad_pcb" | "kicad_sch" => kicad::parse_kicad(path),
         "edif" | "edf" => edif::parse_edif(path),
+        "pdsprj" => proteus::parse_proteus(path),
         "sch" | "brd" => {
             if is_xml_file(&path) {
                 eagle::parse_eagle(path)
@@ -154,7 +156,7 @@ pub fn parse_project_directory<P: AsRef<Path>>(dir: P) -> Result<HardwareDesign>
             if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                     let ext_lower = ext.to_lowercase();
-                    if ext_lower == "kicad_pcb" || ext_lower == "kicad_sch" || ext_lower == "brd" || ext_lower == "edif" || ext_lower == "edf" || (ext_lower == "sch" && !path.to_string_lossy().contains("bom")) {
+                    if ext_lower == "kicad_pcb" || ext_lower == "kicad_sch" || ext_lower == "brd" || ext_lower == "edif" || ext_lower == "edf" || ext_lower == "pdsprj" || (ext_lower == "sch" && !path.to_string_lossy().contains("bom")) {
                         cad_file = Some(path);
                         break;
                     }
@@ -209,7 +211,7 @@ pub fn has_design_source<P: AsRef<Path>>(dir: P) -> bool {
             if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                     let e = ext.to_lowercase();
-                    if e == "kicad_pcb" || e == "kicad_sch" || e == "brd" || e == "edif" || e == "edf"
+                    if e == "kicad_pcb" || e == "kicad_sch" || e == "brd" || e == "edif" || e == "edf" || e == "pdsprj"
                         || (e == "sch" && !path.to_string_lossy().to_lowercase().contains("bom"))
                     {
                         return true;

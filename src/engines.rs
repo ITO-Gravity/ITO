@@ -305,7 +305,7 @@ impl Engine for SemanticCadEngine {
             for entry in entries.flatten() {
                 if let Some(ext) = entry.path().extension().and_then(|s| s.to_str()) {
                     let ext_lower = ext.to_lowercase();
-                    if ext_lower == "kicad_pcb" || ext_lower == "kicad_sch" || ext_lower == "brd" || ext_lower == "edif" || ext_lower == "edf" || ext_lower == "sch" || entry.file_name() == "design.json" {
+                    if ext_lower == "kicad_pcb" || ext_lower == "kicad_sch" || ext_lower == "brd" || ext_lower == "edif" || ext_lower == "edf" || ext_lower == "sch" || ext_lower == "pdsprj" || entry.file_name() == "design.json" {
                         return true;
                     }
                 }
