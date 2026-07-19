@@ -113,10 +113,15 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
                         }
                     }
                     if !resolved {
-                        let local_path = project_dir.join(module_name);
-                        if local_path.exists() && local_path.is_dir() {
-                            let default_engine = if module_name == "electronics" { "semantic-cad".to_string() } else { "file-hash".to_string() };
-                            active_modules.push((module_name.to_string(), local_path, default_engine));
+                        // Electrónica sin link: descubrir dónde vive el diseño (raíz/electronics/pcb/…).
+                        // El resto de módulos: su subcarpeta local homónima.
+                        if module_name == "electronics" {
+                            active_modules.push((module_name.to_string(), resolve_electronics_dir(&project_dir), "semantic-cad".to_string()));
+                        } else {
+                            let local_path = project_dir.join(module_name);
+                            if local_path.exists() && local_path.is_dir() {
+                                active_modules.push((module_name.to_string(), local_path, "file-hash".to_string()));
+                            }
                         }
                     }
                 }
@@ -124,11 +129,12 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
         }
     }
 
-    // Si no hay módulos vinculados, usar el fallback tradicional (root del proyecto con semantic-cad)
+    // Si no hay módulos vinculados, descubrir automáticamente la carpeta de electrónica
+    // (raíz, electronics/, electronics/pcb/, electronics/schematics/) sin necesidad de `ito link`.
     if active_modules.is_empty() {
         active_modules.push((
             "electronics".to_string(),
-            project_dir.clone(),
+            resolve_electronics_dir(&project_dir),
             "semantic-cad".to_string()
         ));
     }
@@ -272,6 +278,33 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
     Ok(commit_entry)
 }
 
+/// Calcula la siguiente revisión a partir de la actual: "REV-0001" -> "REV-0002".
+/// Tolerante: si el formato no coincide, arranca en "REV-0001".
+pub fn next_revision(current: &str) -> String {
+    if let Some(num_part) = current.strip_prefix("REV-") {
+        if let Ok(n) = num_part.parse::<u32>() {
+            return format!("REV-{:04}", n + 1);
+        }
+    }
+    "REV-0001".to_string()
+}
+
+/// Incrementa `current_revision` en ito.json al cerrar una versión y devuelve la nueva revisión.
+pub fn bump_revision(project_dir: &std::path::Path) -> Result<String, String> {
+    let ito_json_path = project_dir.join("ito.json");
+    let content = std::fs::read_to_string(&ito_json_path)
+        .map_err(|e| format!("No se pudo leer ito.json: {}", e))?;
+    let mut config: models::ItoProjectConfig = serde_json::from_str(&content)
+        .map_err(|e| format!("No se pudo parsear ito.json: {}", e))?;
+    let new_rev = next_revision(&config.current_revision);
+    config.current_revision = new_rev.clone();
+    let out = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("No se pudo serializar ito.json: {}", e))?;
+    write_atomic(&ito_json_path, &out)
+        .map_err(|e| format!("No se pudo escribir ito.json: {}", e))?;
+    Ok(new_rev)
+}
+
 pub fn run_restore(project_dir: std::path::PathBuf, target_hash: &str) -> Result<Vec<String>, String> {
     let history_path = project_dir.join(".ito").join("history.toml");
     if !history_path.exists() {
@@ -313,7 +346,8 @@ pub fn run_restore(project_dir: std::path::PathBuf, target_hash: &str) -> Result
                 }
             } else {
                 if key == "electronics" {
-                    project_dir.clone()
+                    // Misma resolución que run_commit para restaurar donde vive el diseño.
+                    resolve_electronics_dir(&project_dir)
                 } else {
                     continue;
                 }
@@ -364,11 +398,13 @@ pub fn run_new(cwd: std::path::PathBuf, project_name: &str) -> Result<(std::path
         "electronics/pcb",
         "electronics/schematics",
         "electronics/libraries",
+        "electronics/netlist",   // netlist/EDIF exportado al cerrar versión (ITO lo busca acá para el ERC)
         "mechanical",
         "mechanical/cad",
         "mechanical/drawings",
         "documentation",
         "manufacturing",
+        "releases",              // artefactos de cierre de versión (paquetes, netlist, PDFs)
         "assets",
         "scripts",
         "tests",
@@ -432,13 +468,25 @@ pub fn run_new(cwd: std::path::PathBuf, project_name: &str) -> Result<(std::path
     // 4. Generar archivo README.md
     let readme_path = project_dir.join("README.md");
     let readme_content = format!(
-        "# {}\n\nProyecto multidisciplinar de ingeniería inicializado con ITO.\n\n\
+        "# {}\n\nProyecto multidisciplinar de ingeniería versionado con ITO.\n\n\
          ## Módulos del proyecto\n\
-         - **Firmware**: Código fuente del firmware.\n\
-         - **Electronics**: Diseño electrónico, esquemas y PCBs.\n\
-         - **Mechanical**: Planos mecánicos y CAD.\n\
-         - **Documentation**: Manuales, datasheets y guías.\n\
-         - **Manufacturing**: Archivos de fabricación (Gerbers, BOM, DXF).\n",
+         - **firmware/**: Código fuente del firmware (ITO delega el versionado a Git si hay un repo).\n\
+         - **electronics/**: Diseño electrónico. Poné tu CAD acá (o en `pcb/` o `schematics/`) y ITO lo detecta solo — no hace falta `ito link`.\n\
+         - **mechanical/**: Planos mecánicos y CAD.\n\
+         - **documentation/**: Manuales, datasheets y guías.\n\
+         - **manufacturing/**: Archivos de fabricación (Gerbers, BOM, DXF).\n\
+         - **releases/**: Artefactos de cierre de versión (paquetes de manufactura, netlist, PDFs del esquema).\n\n\
+         ## Convención de electrónica\n\
+         - Tu diseño (KiCad, Eagle, EDIF, Proteus…) va en `electronics/` o sus subcarpetas.\n\
+         - `electronics/netlist/`: al **cerrar una versión**, exportá el **netlist EDIF** acá. ITO lo usa para el\n  \
+         chequeo eléctrico (ERC). En el día a día ITO ya rastrea componentes y valores sin exportar nada.\n\n\
+         ## Flujo típico\n\
+         ```\n\
+         ito status      # ver el estado de los módulos\n\
+         ito diff        # ver los cambios semánticos (componentes, valores, nets)\n\
+         ito commit -m \"...\"   # guardar una versión\n\
+         ito lint        # chequeo eléctrico (ERC) — al cerrar versión, con el EDIF en electronics/netlist/\n\
+         ```\n",
         project_name
     );
     std::fs::write(&readme_path, readme_content)
@@ -1202,34 +1250,41 @@ pub fn run_auth_login(project_dir: std::path::PathBuf, token: &str) -> std::resu
 /// 1) por link en ito.json, 2) carpeta `electronics/` local, 3) fallback a la raíz del proyecto.
 /// Se usa para que `ito diff` (y otros) miren el mismo lugar que se versiona.
 pub fn resolve_electronics_dir(project_dir: &std::path::Path) -> std::path::PathBuf {
+    // 1. Link explícito en ito.json (tiene prioridad).
     let ito_json_path = project_dir.join("ito.json");
     if let Ok(content) = std::fs::read_to_string(&ito_json_path) {
         if let Ok(config) = serde_json::from_str::<models::ItoProjectConfig>(&content) {
-            let has_links = config.links.as_ref().map(|l| !l.is_empty()).unwrap_or(false);
-            if has_links {
-                if let Some(links) = &config.links {
-                    if let Some(link) = links.get("electronics") {
-                        let raw_path = std::path::PathBuf::from(&link.path);
-                        let resolved = if raw_path.is_absolute() {
-                            raw_path
-                        } else {
-                            project_dir.join(raw_path)
-                        };
-                        if resolved.exists() {
-                            return resolved;
-                        }
+            if let Some(links) = config.links {
+                if let Some(link) = links.get("electronics") {
+                    let raw_path = std::path::PathBuf::from(&link.path);
+                    let resolved = if raw_path.is_absolute() {
+                        raw_path
+                    } else {
+                        project_dir.join(raw_path)
+                    };
+                    if resolved.exists() {
+                        return resolved;
                     }
                 }
-                let local_electronics = project_dir.join("electronics");
-                if local_electronics.is_dir() {
-                    return local_electronics;
-                }
             }
-            // Sin links (o electrónica no resuelta): la electrónica es la raíz, igual que el
-            // fallback de run_commit.
-            return project_dir.to_path_buf();
         }
     }
+
+    // 2. Auto-detección: buscar dónde vive realmente el diseño, sin necesidad de `ito link`.
+    //    Se prueban las subcarpetas estándar de electrónica y, por compatibilidad, la raíz.
+    let candidates = ["electronics/pcb", "electronics/schematics", "electronics", "."];
+    for cand in candidates {
+        let dir = if cand == "." {
+            project_dir.to_path_buf()
+        } else {
+            project_dir.join(cand)
+        };
+        if dir.is_dir() && parsers::has_design_source(&dir) {
+            return dir;
+        }
+    }
+
+    // 3. Fallback: la raíz del proyecto.
     project_dir.to_path_buf()
 }
 
@@ -2213,6 +2268,46 @@ mod tests {
         // Un commit sin cambios de contenido (solo cambia el mensaje) debe rechazarse.
         let c3 = run_commit(p_path.clone(), Some("mensaje diferente".to_string()));
         assert!(c3.is_err(), "un commit sin cambios reales de contenido debe rechazarse");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_next_revision() {
+        assert_eq!(next_revision("REV-0001"), "REV-0002");
+        assert_eq!(next_revision("REV-0009"), "REV-0010");
+        assert_eq!(next_revision("REV-0099"), "REV-0100");
+        assert_eq!(next_revision("basura"), "REV-0001"); // tolerante
+    }
+
+    #[test]
+    fn test_electronics_autodiscovery_in_subfolder() {
+        // "Just works": el usuario suelta su CAD en electronics/pcb/ sin hacer `ito link`,
+        // y commit/diff/restore lo detectan solos.
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-autodisc-{}", unique_id));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let (p_path, _) = run_new(temp_dir.clone(), "AutoProj").unwrap();
+
+        // Diseño en electronics/pcb/ (subcarpeta), SIN ningún link.
+        let cad = p_path.join("electronics").join("pcb").join("design.json");
+        std::fs::write(&cad, r#"{"components":[{"designator":"R1","footprint":"0805","pins":[]}],"nets":[]}"#).unwrap();
+
+        // La resolución debe apuntar a electronics/pcb.
+        let elec = resolve_electronics_dir(&p_path);
+        assert!(elec.ends_with("pcb"), "debe descubrir electronics/pcb, resolvió: {}", elec.display());
+
+        // Commit detecta el componente sin link.
+        let c1 = run_commit(p_path.clone(), Some("c1".to_string())).unwrap();
+        assert_eq!(c1.diff_summary.as_ref().unwrap().added_components, 1);
+
+        // Round-trip: cambiar a R2, commitear, restaurar c1 y verificar que vuelve R1.
+        std::fs::write(&cad, r#"{"components":[{"designator":"R2","footprint":"0805","pins":[]}],"nets":[]}"#).unwrap();
+        let _c2 = run_commit(p_path.clone(), Some("c2".to_string())).unwrap();
+        run_restore(p_path.clone(), &c1.hash[..8]).unwrap();
+        let content = std::fs::read_to_string(&cad).unwrap();
+        assert!(content.contains("R1") && !content.contains("R2"), "restore debe recuperar R1 en la subcarpeta");
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

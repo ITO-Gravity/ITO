@@ -60,6 +60,10 @@ enum Commands {
         /// Envía automáticamente el commit al servidor remoto tras crearlo localmente
         #[arg(long)]
         push: bool,
+
+        /// Cierra una versión: además de commitear, incrementa la revisión (REV-000N) en ito.json
+        #[arg(long)]
+        release: bool,
     },
     /// Muestra el historial completo de revisiones locales de hardware
     Log,
@@ -555,24 +559,11 @@ async fn main() -> Result<()> {
             println!("");
             println!("Note: Si estás de acuerdo con estos cambios, puedes guardarlos localmente con: {}", "ito commit -m \"Mensaje\"".cyan());
         }
-        Commands::Commit { message, force, push } => {
+        Commands::Commit { message, force, push, release } => {
             let current_dir = std::env::current_dir()?;
             let project_root = ito::find_project_root(&current_dir).unwrap_or(current_dir.clone());
-            let mut electronics_path = current_dir.clone();
-            
-            // Buscar si hay un link de electronics en ito.json
-            let ito_json_path = project_root.join("ito.json");
-            if ito_json_path.exists() {
-                if let Ok(content) = std::fs::read_to_string(&ito_json_path) {
-                    if let Ok(config) = serde_json::from_str::<models::ItoProjectConfig>(&content) {
-                        if let Some(links) = config.links {
-                            if let Some(link) = links.get("electronics") {
-                                electronics_path = std::path::PathBuf::from(&link.path);
-                            }
-                        }
-                    }
-                }
-            }
+            // Misma resolución que run_commit (link / electronics / pcb / schematics / raíz).
+            let electronics_path = ito::resolve_electronics_dir(&project_root);
 
             // Ejecutar linter antes de hacer commit en la ruta de electrónica
             if let Ok(design) = parsers::parse_project_directory(&electronics_path) {
@@ -625,6 +616,14 @@ async fn main() -> Result<()> {
                         );
                     }
                     println!("\nNote: Puedes ver el historial de versiones con: {}", "ito log".cyan());
+
+                    // Cierre de versión: incrementar la revisión en ito.json.
+                    if *release {
+                        match ito::bump_revision(&project_root) {
+                            Ok(new_rev) => println!("\n{} Nueva revisión: {}", "Versión cerrada.".green().bold(), new_rev.cyan().bold()),
+                            Err(e) => println!("\n{} No se pudo incrementar la revisión: {}", "Warning:".yellow().bold(), e),
+                        }
+                    }
 
                     if *push {
                         println!("\nIniciando push automático al servidor...");
@@ -788,7 +787,10 @@ async fn main() -> Result<()> {
         }
         Commands::Lint { quiet } => {
             let current_dir = std::env::current_dir()?;
-            let design = parsers::parse_project_directory(&current_dir)?;
+            // Analizar la carpeta de electrónica resuelta (link/electronics/pcb/…/raíz), no solo el cwd.
+            let root = ito::find_project_root(&current_dir).unwrap_or_else(|| current_dir.clone());
+            let elec_dir = ito::resolve_electronics_dir(&root);
+            let design = parsers::parse_project_directory(&elec_dir).unwrap_or_else(|_| models::HardwareDesign::new());
             let issues = linter::run_lint(&design);
             
             let critical_count = issues.iter().filter(|i| i.severity == linter::LintSeverity::Critical).count();
