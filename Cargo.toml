@@ -1,6 +1,6 @@
 [package]
 name = "ito"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2021"
 authors = ["Vasloth Team"]
 description = "Semantic version control engine for hardware engineering (BOM, CAD, and Firmware)"

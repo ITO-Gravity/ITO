@@ -139,6 +139,20 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
         ));
     }
 
+    // Carpetas personalizadas del usuario (`ito folder <nombre>`): son módulos de pleno derecho,
+    // se versionan aunque el proyecto no tenga ningún link configurado.
+    if let Some(ref cfg) = config {
+        for name in cfg.modules.active_custom() {
+            if active_modules.iter().any(|(k, _, _)| *k == name) {
+                continue;
+            }
+            let (path, engine) = resolve_module_dir(&project_dir, &name, cfg);
+            if path.is_dir() {
+                active_modules.push((name, path, engine));
+            }
+        }
+    }
+
     // 2. Calcular el tree_hash: Merkle del CONTENIDO real de todos los módulos.
     //    A diferencia del esquema anterior (que hasheaba el texto del resumen del diff), este id
     //    es un compromiso criptográfico del estado de los archivos, por lo que dos ediciones
@@ -344,13 +358,13 @@ pub fn run_restore(project_dir: std::path::PathBuf, target_hash: &str) -> Result
                 } else {
                     project_dir.join(raw_path)
                 }
+            } else if key == "electronics" {
+                // Misma resolución que run_commit para restaurar donde vive el diseño.
+                resolve_electronics_dir(&project_dir)
             } else {
-                if key == "electronics" {
-                    // Misma resolución que run_commit para restaurar donde vive el diseño.
-                    resolve_electronics_dir(&project_dir)
-                } else {
-                    continue;
-                }
+                // Módulo sin link (carpeta local homónima: firmware/, documentation/ o una carpeta
+                // personalizada del usuario). Antes se salteaba y el módulo nunca se restauraba.
+                project_dir.join(key)
             };
 
             let engine = registry.get_engine(&payload.engine_name)
@@ -446,13 +460,7 @@ pub fn run_new(cwd: std::path::PathBuf, project_name: &str) -> Result<(std::path
         project_uuid: project_uuid.clone(),
         created_at,
         created_by,
-        modules: models::ItoProjectModules {
-            firmware: true,
-            electronics: true,
-            mechanical: true,
-            documentation: true,
-            manufacturing: true,
-        },
+        modules: models::ItoProjectModules::default(),
         current_revision: "REV-0001".to_string(),
         license: "MIT".to_string(),
         version: "0.1.0".to_string(),
@@ -476,6 +484,10 @@ pub fn run_new(cwd: std::path::PathBuf, project_name: &str) -> Result<(std::path
          - **documentation/**: Manuales, datasheets y guías.\n\
          - **manufacturing/**: Archivos de fabricación (Gerbers, BOM, DXF).\n\
          - **releases/**: Artefactos de cierre de versión (paquetes de manufactura, netlist, PDFs del esquema).\n\n\
+         ## Carpetas propias\n\
+         ¿Necesitás una carpeta que no está en la lista (ensayos, proveedores, un formato que ITO todavía no\n  \
+         conoce)? Creala con `ito folder <nombre>`: queda registrada como un módulo más y se versiona con el\n  \
+         resto del proyecto. Listalas con `ito folder --list`.\n\n\
          ## Convención de electrónica\n\
          - Tu diseño (KiCad, Eagle, EDIF, Proteus…) va en `electronics/` o sus subcarpetas.\n\
          - `electronics/netlist/`: al **cerrar una versión**, exportá el **netlist EDIF** acá. ITO lo usa para el\n  \
@@ -495,6 +507,178 @@ pub fn run_new(cwd: std::path::PathBuf, project_name: &str) -> Result<(std::path
     Ok((project_dir, project_uuid))
 }
 
+/// Nombres de carpeta que ITO no puede versionar: o son de uso interno del motor, o el filtro
+/// de ignorados (`ignore.rs`) los descarta, con lo cual la carpeta existiría pero nunca entraría
+/// a un commit. Mejor rechazarlos al crearlos que dejar al usuario con un módulo fantasma.
+const RESERVED_FOLDER_NAMES: [&str; 12] = [
+    ".ito", ".git", ".pio", ".venv", ".vs", "node_modules", "target", "bin", "obj", "history",
+    "__pycache__", "releases",
+];
+
+/// Nombres de dispositivo reservados por Windows: no se puede crear una carpeta con estos nombres.
+const WINDOWS_DEVICE_NAMES: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// Valida y normaliza el nombre de una carpeta personalizada. El nombre es a la vez el nombre
+/// de la carpeta en disco y la clave del módulo en ito.json, así que tiene que ser un nombre de
+/// carpeta válido, de un solo nivel y que no pise nada de ITO.
+pub fn normalize_custom_module_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim().trim_matches('"').trim();
+
+    if name.is_empty() {
+        return Err("El nombre de la carpeta no puede estar vacío.".to_string());
+    }
+    if name.chars().count() > 64 {
+        return Err("El nombre de la carpeta es demasiado largo (máximo 64 caracteres).".to_string());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(format!(
+            "'{}' contiene separadores de ruta. La carpeta se crea en la raíz del proyecto: usá un solo nombre (ej. 'ensayos'). Las subcarpetas que armes adentro se versionan igual.",
+            name
+        ));
+    }
+    if let Some(bad) = name.chars().find(|c| "<>:\"|?*".contains(*c) || (*c as u32) < 0x20) {
+        return Err(format!("El nombre contiene un carácter no permitido: '{}'.", bad));
+    }
+    if name.starts_with('.') {
+        return Err("El nombre no puede empezar con punto (las carpetas ocultas se reservan para uso interno de ITO).".to_string());
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Err("El nombre no puede terminar en punto ni en espacio.".to_string());
+    }
+
+    let lower = name.to_lowercase();
+    if WINDOWS_DEVICE_NAMES.contains(&lower.as_str()) {
+        return Err(format!("'{}' es un nombre reservado por Windows y no se puede usar como carpeta.", name));
+    }
+    if models::STANDARD_MODULES.contains(&lower.as_str()) {
+        return Err(format!(
+            "'{}' ya es un módulo estándar de ITO: esa carpeta ya se versiona sola, no hace falta crearla.",
+            name
+        ));
+    }
+    if RESERVED_FOLDER_NAMES.contains(&lower.as_str()) {
+        return Err(format!(
+            "'{}' es un nombre reservado (ITO lo ignora al versionar). Elegí otro.",
+            name
+        ));
+    }
+
+    Ok(name.to_string())
+}
+
+/// Carga ito.json de un proyecto ya inicializado.
+fn load_project_config(project_root: &std::path::Path) -> Result<models::ItoProjectConfig, String> {
+    let ito_json_path = project_root.join("ito.json");
+    if !ito_json_path.exists() {
+        return Err("No se encontró ito.json en la raíz del proyecto. ¿Inicializaste con 'ito new' o 'ito init'?".to_string());
+    }
+    let content = std::fs::read_to_string(&ito_json_path)
+        .map_err(|e| format!("Error al leer ito.json: {}", e))?;
+    serde_json::from_str(&content).map_err(|e| format!("Error al parsear ito.json: {}", e))
+}
+
+/// Resuelve dónde vive físicamente un módulo y con qué motor se versiona:
+/// primero el link explícito de ito.json, si no la carpeta homónima en la raíz del proyecto.
+pub fn resolve_module_dir(
+    project_dir: &std::path::Path,
+    module_key: &str,
+    config: &models::ItoProjectConfig,
+) -> (std::path::PathBuf, String) {
+    if let Some(ref links) = config.links {
+        if let Some(link) = links.get(module_key) {
+            let raw_path = std::path::PathBuf::from(&link.path);
+            let resolved = if raw_path.is_absolute() {
+                raw_path
+            } else {
+                project_dir.join(raw_path)
+            };
+            let engine = if link.engine.is_empty() { "file-hash".to_string() } else { link.engine.clone() };
+            return (resolved, engine);
+        }
+    }
+    (project_dir.join(module_key), "file-hash".to_string())
+}
+
+/// Devuelve los módulos personalizados registrados en el proyecto junto con su carpeta física.
+pub fn list_custom_modules(project_root: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
+    match load_project_config(project_root) {
+        Ok(config) => config
+            .modules
+            .active_custom()
+            .into_iter()
+            .map(|name| {
+                let (path, _) = resolve_module_dir(project_root, &name, &config);
+                (name, path)
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Crea (o adopta, si ya existe) una carpeta personalizada en la raíz del proyecto y la registra
+/// como un módulo más en ito.json, para que se versione junto con el resto del proyecto.
+///
+/// La idea es que el proyecto se adapte a lo que cada usuario necesita: si trabaja con archivos
+/// o disciplinas que ITO todavía no conoce, los mete en su propia carpeta y el historial los
+/// cubre igual (motor `file-hash`, que versiona cualquier archivo por contenido).
+///
+/// Devuelve `(ruta_de_la_carpeta, se_creó_la_carpeta_ahora)`.
+pub fn run_new_folder(
+    project_root: &std::path::Path,
+    raw_name: &str,
+) -> Result<(std::path::PathBuf, bool), String> {
+    let name = normalize_custom_module_name(raw_name)?;
+    let mut config = load_project_config(project_root)?;
+
+    // No permitir dos módulos que solo difieran en mayúsculas: en Windows serían la misma carpeta.
+    if let Some((existing, active)) = config
+        .modules
+        .custom
+        .iter()
+        .find(|(k, _)| k.to_lowercase() == name.to_lowercase())
+        .map(|(k, v)| (k.clone(), *v))
+    {
+        if active {
+            return Err(format!(
+                "La carpeta '{}' ya está registrada como módulo del proyecto.",
+                existing
+            ));
+        }
+        config.modules.custom.remove(&existing);
+    }
+
+    let folder_path = project_root.join(&name);
+    let created_now = !folder_path.exists();
+    if folder_path.exists() && !folder_path.is_dir() {
+        return Err(format!(
+            "Ya existe un archivo llamado '{}' en la raíz del proyecto.",
+            name
+        ));
+    }
+    std::fs::create_dir_all(&folder_path)
+        .map_err(|e| format!("Error al crear la carpeta '{}': {}", folder_path.display(), e))?;
+
+    // .gitkeep solo si la carpeta está vacía, para que no se pierda al pasar por Git.
+    let is_empty = std::fs::read_dir(&folder_path)
+        .map(|mut e| e.next().is_none())
+        .unwrap_or(false);
+    if is_empty {
+        let _ = std::fs::write(folder_path.join(".gitkeep"), "# Mantenido vacío por ITO\n");
+    }
+
+    config.modules.custom.insert(name.clone(), true);
+
+    let ito_json_path = project_root.join("ito.json");
+    let updated = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Error al serializar ito.json: {}", e))?;
+    write_atomic(&ito_json_path, &updated)
+        .map_err(|e| format!("Error al guardar ito.json: {}", e))?;
+
+    Ok((folder_path, created_now))
+}
 
 fn load_manifest(project_dir: &std::path::Path) -> std::collections::HashSet<String> {
     let manifest_path = project_dir.join(".ito").join("manifest.json");
@@ -871,13 +1055,7 @@ pub fn run_link(project_root: std::path::PathBuf, module_key: &str, target_path:
             project_uuid,
             created_at,
             created_by,
-            modules: models::ItoProjectModules {
-                firmware: true,
-                electronics: true,
-                mechanical: true,
-                documentation: true,
-                manufacturing: true,
-            },
+            modules: models::ItoProjectModules::default(),
             current_revision: "REV-0001".to_string(),
             license: "MIT".to_string(),
             version: "0.1.0".to_string(),
@@ -1179,13 +1357,7 @@ pub fn run_auth_login(project_dir: std::path::PathBuf, token: &str) -> std::resu
                     project_uuid: uuid::Uuid::new_v4().to_string(),
                     created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                     created_by: "ITO CLI".to_string(),
-                    modules: models::ItoProjectModules {
-                        firmware: true,
-                        electronics: true,
-                        mechanical: true,
-                        documentation: true,
-                        manufacturing: true,
-                    },
+                    modules: models::ItoProjectModules::default(),
                     current_revision: "REV-0001".to_string(),
                     license: "MIT".to_string(),
                     version: "0.1.0".to_string(),
@@ -1198,13 +1370,7 @@ pub fn run_auth_login(project_dir: std::path::PathBuf, token: &str) -> std::resu
                     project_uuid: uuid::Uuid::new_v4().to_string(),
                     created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                     created_by: "ITO CLI".to_string(),
-                    modules: models::ItoProjectModules {
-                        firmware: true,
-                        electronics: true,
-                        mechanical: true,
-                        documentation: true,
-                        manufacturing: true,
-                    },
+                    modules: models::ItoProjectModules::default(),
                     current_revision: "REV-0001".to_string(),
                     license: "MIT".to_string(),
                     version: "0.1.0".to_string(),
@@ -1218,13 +1384,7 @@ pub fn run_auth_login(project_dir: std::path::PathBuf, token: &str) -> std::resu
                 project_uuid: uuid::Uuid::new_v4().to_string(),
                 created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 created_by: "ITO CLI".to_string(),
-                modules: models::ItoProjectModules {
-                    firmware: true,
-                    electronics: true,
-                    mechanical: true,
-                    documentation: true,
-                    manufacturing: true,
-                },
+                modules: models::ItoProjectModules::default(),
                 current_revision: "REV-0001".to_string(),
                 license: "MIT".to_string(),
                 version: "0.1.0".to_string(),
@@ -1976,13 +2136,7 @@ pub async fn run_clone(token_or_project: String) -> std::result::Result<String, 
         project_uuid: uuid::Uuid::new_v4().to_string(),
         created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         created_by: "ITO CLI".to_string(),
-        modules: models::ItoProjectModules {
-            firmware: true,
-            electronics: true,
-            mechanical: true,
-            documentation: true,
-            manufacturing: true,
-        },
+        modules: models::ItoProjectModules::default(),
         current_revision: "REV-0001".to_string(),
         license: "MIT".to_string(),
         version: "0.1.0".to_string(),
@@ -2038,6 +2192,66 @@ mod tests {
         assert!(err_res.is_err());
 
         // Limpiar
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_custom_folder_name_validation() {
+        assert_eq!(normalize_custom_module_name("  ensayos  ").unwrap(), "ensayos");
+        assert_eq!(normalize_custom_module_name("Ensayos de Vibración").unwrap(), "Ensayos de Vibración");
+
+        // Un solo nivel: nada de rutas.
+        assert!(normalize_custom_module_name("docs/notas").is_err());
+        assert!(normalize_custom_module_name("..").is_err());
+        assert!(normalize_custom_module_name("../../etc").is_err());
+        // Caracteres y formas inválidas en Windows.
+        assert!(normalize_custom_module_name("a:b").is_err());
+        assert!(normalize_custom_module_name("con").is_err());
+        assert!(normalize_custom_module_name("nombre.").is_err());
+        // Nombres reservados por ITO.
+        assert!(normalize_custom_module_name(".ito").is_err());
+        assert!(normalize_custom_module_name("electronics").is_err());
+        assert!(normalize_custom_module_name("Firmware").is_err());
+        assert!(normalize_custom_module_name("target").is_err());
+        assert!(normalize_custom_module_name("").is_err());
+    }
+
+    #[test]
+    fn test_custom_folder_is_registered_and_versioned() {
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-folder-{}", unique_id));
+        let (project_path, _) = run_new(temp_dir.clone(), "ProyectoCarpeta").unwrap();
+
+        // 1. Crear la carpeta personalizada
+        let (folder_path, created_now) = run_new_folder(&project_path, "ensayos").unwrap();
+        assert!(created_now);
+        assert!(folder_path.is_dir());
+        assert_eq!(folder_path, project_path.join("ensayos"));
+
+        // 2. Queda registrada como módulo en ito.json
+        let config = load_project_config(&project_path).unwrap();
+        assert_eq!(config.modules.active_custom(), vec!["ensayos".to_string()]);
+        // ...y los módulos estándar siguen intactos tras el ida y vuelta por serde(flatten)
+        assert!(config.modules.firmware && config.modules.electronics);
+
+        // 3. No se puede registrar dos veces (ni cambiando mayúsculas: en Windows es la misma carpeta)
+        assert!(run_new_folder(&project_path, "ensayos").is_err());
+        assert!(run_new_folder(&project_path, "ENSAYOS").is_err());
+
+        // 4. Su contenido entra al commit y se puede restaurar
+        let archivo = folder_path.join("protocolo.txt");
+        std::fs::write(&archivo, "version 1").unwrap();
+        let commit1 = run_commit(project_path.clone(), Some("v1 con ensayos".to_string())).unwrap();
+        assert!(commit1.modules.contains_key("ensayos"), "el módulo personalizado debe versionarse");
+
+        std::fs::write(&archivo, "version 2").unwrap();
+        let _ = run_commit(project_path.clone(), Some("v2".to_string())).unwrap();
+        assert_eq!(std::fs::read_to_string(&archivo).unwrap(), "version 2");
+
+        let restored = run_restore(project_path.clone(), &commit1.hash).unwrap();
+        assert!(restored.contains(&"ensayos".to_string()));
+        assert_eq!(std::fs::read_to_string(&archivo).unwrap(), "version 1");
+
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 

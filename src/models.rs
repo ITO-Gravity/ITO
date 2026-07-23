@@ -228,6 +228,16 @@ mod tests {
     }
 }
 
+/// Módulos que ITO trae de fábrica. El resto de las claves de `modules` en ito.json son
+/// carpetas personalizadas que creó el usuario con `ito folder <nombre>`.
+pub const STANDARD_MODULES: [&str; 5] = [
+    "firmware",
+    "electronics",
+    "mechanical",
+    "documentation",
+    "manufacturing",
+];
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItoProjectModules {
@@ -236,6 +246,36 @@ pub struct ItoProjectModules {
     pub mechanical: bool,
     pub documentation: bool,
     pub manufacturing: bool,
+    /// Módulos personalizados del usuario (`ito folder <nombre>`). Van aplanados al mismo nivel
+    /// que los estándar, así ito.json se sigue leyendo natural:
+    /// `"modules": { "firmware": true, ..., "ensayos": true }`.
+    /// Se usa BTreeMap para que el orden sea determinista (el tree_hash del commit depende de él).
+    #[serde(flatten, default)]
+    pub custom: std::collections::BTreeMap<String, bool>,
+}
+
+impl Default for ItoProjectModules {
+    fn default() -> Self {
+        Self {
+            firmware: true,
+            electronics: true,
+            mechanical: true,
+            documentation: true,
+            manufacturing: true,
+            custom: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+impl ItoProjectModules {
+    /// Nombres de los módulos personalizados activos, en orden determinista.
+    pub fn active_custom(&self) -> Vec<String> {
+        self.custom
+            .iter()
+            .filter(|(name, active)| **active && !STANDARD_MODULES.contains(&name.as_str()))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

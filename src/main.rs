@@ -83,6 +83,16 @@ enum Commands {
         /// Nombre del nuevo proyecto
         name: String,
     },
+    /// Crea una carpeta personalizada en el proyecto y la versiona como un módulo más
+    #[command(alias = "carpeta")]
+    Folder {
+        /// Nombre de la carpeta (si se omite, ITO lo pregunta)
+        name: Option<String>,
+
+        /// Solo listar las carpetas personalizadas ya registradas
+        #[arg(long)]
+        list: bool,
+    },
     /// Administra el Workspace global de ITO
     Workspace {
         #[command(subcommand)]
@@ -185,13 +195,7 @@ async fn main() -> Result<()> {
                     project_uuid,
                     created_at,
                     created_by,
-                    modules: models::ItoProjectModules {
-                        firmware: true,
-                        electronics: true,
-                        mechanical: true,
-                        documentation: true,
-                        manufacturing: true,
-                    },
+                    modules: models::ItoProjectModules::default(),
                     current_revision: "REV-0001".to_string(),
                     license: "MIT".to_string(),
                     version: "0.1.0".to_string(),
@@ -210,11 +214,13 @@ async fn main() -> Result<()> {
                 let ito_json_path = root.join("ito.json");
                 let mut project_name = "Proyecto Ito".to_string();
                 let mut links = std::collections::HashMap::new();
+                let mut custom_modules: Vec<String> = Vec::new();
 
                 if ito_json_path.exists() {
                     if let Ok(content) = std::fs::read_to_string(&ito_json_path) {
                         if let Ok(config) = serde_json::from_str::<models::ItoProjectConfig>(&content) {
                             project_name = config.project_name;
+                            custom_modules = config.modules.active_custom();
                             links = config.links.unwrap_or_default();
                         }
                     }
@@ -281,6 +287,57 @@ async fn main() -> Result<()> {
                             }
                             println!();
                         }
+                    }
+                }
+
+                // Carpetas personalizadas del usuario (`ito folder <nombre>`): se versionan igual
+                // que los módulos estándar, así que también tienen que verse en el estado.
+                if !custom_modules.is_empty() {
+                    let registry = ito::engines::EngineRegistry::new();
+                    println!("{}", "Carpetas personalizadas".bold());
+                    for key in &custom_modules {
+                        let (module_path, engine_name) = match links.get(key) {
+                            Some(link) => {
+                                let raw = std::path::PathBuf::from(&link.path);
+                                let resolved = if raw.is_absolute() { raw } else { root.join(raw) };
+                                let engine = if link.engine.is_empty() { "file-hash".to_string() } else { link.engine.clone() };
+                                (resolved, engine)
+                            }
+                            None => (root.join(key), "file-hash".to_string()),
+                        };
+
+                        println!("{}", key.bold());
+                        if !module_path.is_dir() {
+                            println!("  {}", format!("La carpeta '{}' no existe en el disco.", module_path.display()).yellow());
+                            println!();
+                            continue;
+                        }
+
+                        let engine = registry.get_engine(&engine_name)
+                            .unwrap_or_else(|| registry.get_engine("file-hash").unwrap());
+                        let m_cache_dir = root.join(".ito").join("cache").join(key);
+
+                        match engine.status(&module_path, &m_cache_dir) {
+                            Ok(ito::engines::ModuleStatus::Unchanged) => {
+                                println!("  {}", "Sin cambios".green());
+                            }
+                            Ok(ito::engines::ModuleStatus::Modified { summary, details }) => {
+                                println!("  [MODIFIED] {}", summary.yellow());
+                                for detail in details.iter().take(5) {
+                                    println!("    {}", detail.dimmed());
+                                }
+                                if details.len() > 5 {
+                                    println!("    ... y {} cambios más.", details.len() - 5);
+                                }
+                            }
+                            Ok(ito::engines::ModuleStatus::Error(e)) => {
+                                println!("  Warning: Error de análisis: {}", e.red());
+                            }
+                            Err(e) => {
+                                println!("  Warning: {}", e.red());
+                            }
+                        }
+                        println!();
                     }
                 }
             } else {
@@ -924,6 +981,66 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Folder { name, list } => {
+            use std::io::{self, Write};
+            use colored::Colorize;
+
+            let current_dir = std::env::current_dir()?;
+            let root = match ito::find_project_root(&current_dir) {
+                Some(r) => r,
+                None => {
+                    println!("{}", "Error: No se encontró la raíz del proyecto. Ejecutá este comando dentro de un proyecto de ITO.".red().bold());
+                    std::process::exit(1);
+                }
+            };
+
+            let custom = ito::list_custom_modules(&root);
+
+            if *list {
+                println!("\n{}", "Carpetas personalizadas".bold());
+                if custom.is_empty() {
+                    println!("  {}", "El proyecto todavía no tiene carpetas personalizadas.".dimmed());
+                    println!("\nNote: Creá una con: {}", "ito folder <nombre>".cyan());
+                } else {
+                    for (folder, path) in &custom {
+                        println!("  {} {}", folder.cyan().bold(), path.display().to_string().dimmed());
+                    }
+                }
+                return Ok(());
+            }
+
+            let chosen = match name {
+                Some(n) => n.clone(),
+                None => {
+                    print!("Nombre de la carpeta a crear: ");
+                    io::stdout().flush().ok();
+                    let mut input = String::new();
+                    if io::stdin().read_line(&mut input).is_err() {
+                        println!("{}", "Error al leer la entrada.".red());
+                        std::process::exit(1);
+                    }
+                    input.trim().to_string()
+                }
+            };
+
+            match ito::run_new_folder(&root, &chosen) {
+                Ok((path, created_now)) => {
+                    let folder_name = path.file_name().and_then(|n| n.to_str()).unwrap_or(&chosen).to_string();
+                    if created_now {
+                        println!("\nCarpeta creada: {}", folder_name.cyan().bold());
+                    } else {
+                        println!("\nLa carpeta ya existía y fue adoptada: {}", folder_name.cyan().bold());
+                    }
+                    println!("Ubicación: {}", path.display().to_string().cyan());
+                    println!("{}", "Registrada como módulo del proyecto: ITO la versiona junto al resto.".green().bold());
+                    println!("\nNote: Poné adentro los archivos que quieras (de cualquier tipo) y guardá la versión con: {}", "ito commit -m \"Mensaje\"".cyan());
+                }
+                Err(err) => {
+                    println!("{}", format!("Error: {}", err).red().bold());
+                    std::process::exit(1);
+                }
+            }
+        }
         Commands::Workspace { subcommand } => {
             match subcommand {
                 None => {
@@ -1508,6 +1625,7 @@ async fn main() -> Result<()> {
                 ("manufacturing", "Manufactura"),
             ];
 
+            let custom_modules = config.modules.active_custom();
             let links_map = config.links.unwrap_or_default();
 
             for (key, name) in &modules {
@@ -1519,6 +1637,26 @@ async fn main() -> Result<()> {
                     println!("  Ruta:        {}", link.path.dimmed());
                 } else {
                     println!("  {}", "No vinculado".red());
+                }
+            }
+
+            if !custom_modules.is_empty() {
+                println!("\n{}", "Carpetas personalizadas".bold());
+                for key in &custom_modules {
+                    println!("\n{}", key.bold());
+                    match links_map.get(key) {
+                        Some(link) => {
+                            println!("  {}", "Vinculado".green().bold());
+                            println!("  Herramienta: {}", link.tool.cyan());
+                            println!("  Motor:       {}", link.engine.yellow());
+                            println!("  Ruta:        {}", link.path.dimmed());
+                        }
+                        None => {
+                            println!("  {}", "Carpeta local del proyecto".green());
+                            println!("  Motor:       {}", "file-hash".yellow());
+                            println!("  Ruta:        {}", root.join(key).display().to_string().dimmed());
+                        }
+                    }
                 }
             }
         }

@@ -57,6 +57,7 @@ El uso de la CLI está estructurado con base en estándares de comandos de Git y
 | :--- | :--- |
 | `ito init` | Inicializa un repositorio de ITO en el directorio actual, creando la estructura `.ito/`. |
 | `ito new <nombre>` | Crea un proyecto estructurado y normalizado para ingeniería multidisciplinar en el Workspace. |
+| `ito folder <nombre>` | Crea una carpeta personalizada en la raíz del proyecto y la registra como un módulo más, versionada junto al resto (alias: `ito carpeta`; `--list` para listarlas). |
 | `ito status` | Audita y reporta el estado actual de todos los módulos vinculados (BOM, CAD, Firmware). |
 | `ito diff` | Muestra diferencias semánticas detalladas de componentes y redes (nets) contra la última caché. |
 | `ito commit [-m "msg"]` | Ejecuta el linter eléctrico (ERC) y guarda una instantánea inmutable en el historial y el CAS. |
