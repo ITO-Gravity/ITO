@@ -71,6 +71,10 @@ enum Commands {
     Restore {
         /// El hash (o prefijo del hash corto) de la versión a restaurar
         hash: String,
+
+        /// Restaura sin pedir confirmación (para scripts o uso no interactivo)
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
     /// Ejecuta reglas de diseño eléctrico semántico (ERC)
     Lint {
@@ -644,7 +648,7 @@ async fn main() -> Result<()> {
                 Ok(commit) => {
                     use colored::Colorize;
                     println!("{}", "Respaldo de diseño guardado localmente con éxito.".green().bold());
-                    println!("Hash:    {}", commit.hash.cyan());
+                    println!("Versión: {}", ito::short_hash(&commit.hash).cyan().bold());
                     println!("Mensaje: {}", commit.message.bold());
                     println!("Fecha:   {}", commit.timestamp.dimmed());
 
@@ -735,15 +739,17 @@ async fn main() -> Result<()> {
             println!("\n{}", "Historial de Revisiones de Hardware".bold());
             println!("------------------------------------------------------------");
 
+            // La versión actual (HEAD) es el último commit del historial.
+            let head_hash = history.commits.last().map(|c| c.hash.clone()).unwrap_or_default();
+
             // Mostrar el último commit primero
             for commit in history.commits.iter().rev() {
-                let short_hash = if commit.hash.len() > 8 {
-                    &commit.hash[..8]
+                let marker = if commit.hash == head_hash {
+                    format!("  {}", "(actual)".green().bold())
                 } else {
-                    &commit.hash
+                    String::new()
                 };
-
-                println!("Commit:  {}", short_hash.cyan().bold());
+                println!("Commit:  {}{}", ito::short_hash(&commit.hash).cyan().bold(), marker);
                 println!("Fecha:   {}", commit.timestamp.dimmed());
                 println!("Mensaje: {}", commit.message.bold());
 
@@ -786,7 +792,7 @@ async fn main() -> Result<()> {
 
             println!("\nNote: Si deseas restaurar tu diseño a una versión anterior, ejecuta: {}", "ito restore <hash_corto>".cyan());
         }
-        Commands::Restore { hash } => {
+        Commands::Restore { hash, yes } => {
             use std::io::{self, Write};
             use colored::Colorize;
 
@@ -799,20 +805,41 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Verificar si hay cambios sin guardar comparando la caché con la carpeta de trabajo
-            let cache_dir = root.join(".ito").join("cache");
-            let old_design = if cache_dir.exists() {
-                parsers::parse_project_directory(&cache_dir).unwrap_or_else(|_| models::HardwareDesign::new())
-            } else {
-                models::HardwareDesign::new()
+            // Resolver la versión destino ANTES de tocar nada, para mostrarle al usuario a qué
+            // versión va a volver (y fallar temprano y claro si el hash no existe).
+            let target = match ito::find_commit_by_prefix(&root, hash) {
+                Some(c) => c,
+                None => {
+                    println!("{}", format!("Error: No se encontró ninguna versión con el prefijo de hash '{}'.", hash).red().bold());
+                    println!("Note: Mirá los hashes disponibles con: {}", "ito log".cyan());
+                    std::process::exit(1);
+                }
             };
-            let new_design = parsers::parse_project_directory(&root).unwrap_or_else(|_| models::HardwareDesign::new());
-            let diff_result = diff::diff_designs(&old_design, &new_design);
 
-            if !diff_result.is_empty() {
-                println!("{}", "Warning: Tienes cambios no guardados en tu diseño de hardware actual.".yellow().bold());
-                println!("Si restauras otra versión, perderás de forma permanente los cambios actuales.");
-                print!("¿Deseas continuar de todas formas? [s/N]: ");
+            // Restaurar SIEMPRE pisa el directorio de trabajo con una versión vieja: es una
+            // operación destructiva, así que confirmamos salvo que se pase --yes.
+            if !*yes {
+                // Detectar cambios de electrónica sin commitear para reforzar el aviso. Se lee de la
+                // caché DEL MÓDULO y de la carpeta de electrónica resuelta (mismo lugar que se versiona).
+                let cache_dir = root.join(".ito").join("cache").join("electronics");
+                let old_design = if cache_dir.exists() {
+                    parsers::parse_project_directory(&cache_dir).unwrap_or_else(|_| models::HardwareDesign::new())
+                } else {
+                    models::HardwareDesign::new()
+                };
+                let elec_dir = ito::resolve_electronics_dir(&root);
+                let new_design = parsers::parse_project_directory(&elec_dir).unwrap_or_else(|_| models::HardwareDesign::new());
+                let has_unsaved = !diff::diff_designs(&old_design, &new_design).is_empty();
+
+                println!("\n{}", "Vas a restaurar el proyecto a esta versión:".bold());
+                println!("  {}  {}", ito::short_hash(&target.hash).cyan().bold(), target.message.bold());
+                println!("  {}", target.timestamp.dimmed());
+                println!("\n{}", "Esto sobrescribe con esa versión los archivos que ITO tiene rastreados en tu directorio de trabajo.".yellow());
+                println!("{}", "Los archivos que ITO no rastrea se conservan.".dimmed());
+                if has_unsaved {
+                    println!("{}", "Atención: tenés cambios en electrónica sin commitear que se van a perder.".red().bold());
+                }
+                print!("¿Continuar? [s/N]: ");
                 io::stdout().flush().ok();
 
                 let mut answer = String::new();
@@ -821,7 +848,7 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
                 let answer = answer.trim().to_lowercase();
-                if answer != "s" && answer != "si" {
+                if answer != "s" && answer != "si" && answer != "sí" {
                     println!("{}", "Restauración cancelada.".yellow());
                     return Ok(());
                 }
@@ -1472,8 +1499,7 @@ async fn main() -> Result<()> {
                                         println!("\n{}", "Historial de Revisiones de Hardware".bold());
                                         println!("------------------------------------------------------------");
                                         for commit in history.commits.iter().rev() {
-                                            let short_hash = if commit.hash.len() > 8 { &commit.hash[..8] } else { &commit.hash };
-                                            println!("Commit:  {}", short_hash.cyan().bold());
+                                            println!("Commit:  {}", ito::short_hash(&commit.hash).cyan().bold());
                                             println!("Fecha:   {}", commit.timestamp.dimmed());
                                             println!("Mensaje: {}", commit.message.bold());
                                             println!("------------------------------------------------------------");

@@ -62,7 +62,7 @@ El uso de la CLI está estructurado con base en estándares de comandos de Git y
 | `ito diff` | Muestra diferencias semánticas detalladas de componentes y redes (nets) contra la última caché. |
 | `ito commit [-m "msg"]` | Ejecuta el linter eléctrico (ERC) y guarda una instantánea inmutable en el historial y el CAS. |
 | `ito log` | Muestra el historial completo de commits del proyecto y el resumen de cambios numéricos. |
-| `ito restore <hash>` | Restaura el estado de todos los módulos vinculados al commit especificado desde el CAS. |
+| `ito restore <hash>` | Restaura todos los módulos al commit indicado (acepta el hash corto). Pide confirmación porque sobrescribe el trabajo actual; `-y`/`--yes` la omite para scripts. |
 | `ito lint` | Ejecuta de forma estática reglas de diseño eléctrico semántico (ERC) sobre los módulos de electrónica. |
 | `ito workspace` | Muestra la ruta física del Workspace global y el conteo de proyectos registrados. |
 | `ito workspace set [ruta]` | Configura o cambia el directorio de trabajo del Workspace global. |

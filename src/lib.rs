@@ -69,6 +69,28 @@ pub fn write_atomic(path: &std::path::Path, contents: &str) -> std::io::Result<(
     }
 }
 
+/// Cantidad de caracteres del hash corto que se le muestra al usuario (como en git). El hash
+/// completo es un sha256 de 64 caracteres; 8 alcanzan para identificar una versión y, como
+/// `run_restore` acepta cualquier prefijo, el hash corto siempre sirve para restaurar.
+pub const SHORT_HASH_LEN: usize = 8;
+
+/// Devuelve el prefijo corto de un hash de commit para mostrarlo en la CLI.
+pub fn short_hash(hash: &str) -> &str {
+    match hash.char_indices().nth(SHORT_HASH_LEN) {
+        Some((idx, _)) => &hash[..idx],
+        None => hash,
+    }
+}
+
+/// Busca un commit por prefijo de hash. Se usa para mostrar a qué versión se va a restaurar
+/// (o cualquier consulta de solo lectura) sin duplicar la carga del historial.
+pub fn find_commit_by_prefix(project_dir: &std::path::Path, prefix: &str) -> Option<CommitEntry> {
+    let history_path = project_dir.join(".ito").join("history.toml");
+    let content = std::fs::read_to_string(&history_path).ok()?;
+    let history: History = toml::from_str(&content).ok()?;
+    history.commits.iter().find(|c| c.hash.starts_with(prefix)).cloned()
+}
+
 pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> Result<CommitEntry, String> {
     let ito_dir = project_dir.join(".ito");
     if !ito_dir.exists() {
@@ -2192,6 +2214,36 @@ mod tests {
         assert!(err_res.is_err());
 
         // Limpiar
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_short_hash() {
+        let full = "f6803fa047a6b06d72f27aeea20c542ed4651de8ba4909954e6731215f051dbb";
+        assert_eq!(short_hash(full), "f6803fa0");
+        assert_eq!(short_hash(full).len(), SHORT_HASH_LEN);
+        // Un prefijo del hash corto siempre sirve para restaurar: debe ser prefijo del completo.
+        assert!(full.starts_with(short_hash(full)));
+        // Hashes más cortos que el límite se devuelven tal cual (sin panic).
+        assert_eq!(short_hash("abc"), "abc");
+        assert_eq!(short_hash(""), "");
+    }
+
+    #[test]
+    fn test_find_commit_by_prefix() {
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-findcommit-{}", unique_id));
+        let (project_path, _) = run_new(temp_dir.clone(), "ProyectoFind").unwrap();
+        std::fs::write(project_path.join("documentation").join("nota.txt"), "hola").unwrap();
+        let commit = run_commit(project_path.clone(), Some("primero".to_string())).unwrap();
+
+        // Se encuentra por el hash corto (prefijo) igual que lo mostrado en la CLI.
+        let found = find_commit_by_prefix(&project_path, short_hash(&commit.hash)).unwrap();
+        assert_eq!(found.hash, commit.hash);
+        assert_eq!(found.message, "primero");
+        // Un prefijo inexistente devuelve None (no error).
+        assert!(find_commit_by_prefix(&project_path, "zzzzzzzz").is_none());
+
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
