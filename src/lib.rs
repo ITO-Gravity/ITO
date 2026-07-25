@@ -51,6 +51,75 @@ pub struct History {
     pub commits: Vec<CommitEntry>,
 }
 
+/// Hash "cero" que representa la ausencia de padre (la raíz del historial de un hilo).
+pub const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// Nombre del hilo por defecto (la línea principal de trabajo).
+/// ITO llama "hilos" a sus ramas — a propósito, para no confundirlas con las ramas de git del
+/// código (git = ramas, ITO = hilos). Un "hilo" es una línea de versiones paralela: podés abrir
+/// uno para probar algo y, si no gusta, volver a `principal` sin haber tocado lo bueno.
+pub const DEFAULT_HILO: &str = "principal";
+
+/// Referencias de hilos del proyecto: qué hilo está activo (HEAD) y la punta (último commit) de
+/// cada hilo. Es el equivalente a HEAD + refs/heads de git, pero para las versiones de ITO. Se
+/// guarda en `.ito/refs.toml`. Los proyectos creados antes de esto no lo tienen: se migra solo,
+/// creando el hilo `principal` sobre el último commit del historial (sin tocar nada más).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Refs {
+    /// Nombre del hilo actualmente activo.
+    pub head: String,
+    /// nombre_de_hilo -> hash del commit que es su punta. BTreeMap para orden determinista.
+    #[serde(default)]
+    pub hilos: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for Refs {
+    fn default() -> Self {
+        Self { head: DEFAULT_HILO.to_string(), hilos: std::collections::BTreeMap::new() }
+    }
+}
+
+impl Refs {
+    /// Hash de la punta del hilo activo (o el hash cero si el hilo todavía no tiene commits).
+    pub fn head_tip(&self) -> String {
+        self.hilos.get(&self.head).cloned().unwrap_or_else(|| ZERO_HASH.to_string())
+    }
+}
+
+fn refs_path(project_dir: &std::path::Path) -> std::path::PathBuf {
+    project_dir.join(".ito").join("refs.toml")
+}
+
+/// Construye las refs iniciales a partir del historial existente (migración de proyectos viejos):
+/// el hilo `principal` apunta al último commit, o queda sin punta si aún no hay commits.
+pub fn init_refs_from_history(history: &History) -> Refs {
+    let mut refs = Refs::default();
+    if let Some(last) = history.commits.last() {
+        refs.hilos.insert(DEFAULT_HILO.to_string(), last.hash.clone());
+    }
+    refs
+}
+
+/// Carga las refs del proyecto si el archivo existe y es válido.
+pub fn load_refs(project_dir: &std::path::Path) -> Option<Refs> {
+    let content = std::fs::read_to_string(refs_path(project_dir)).ok()?;
+    toml::from_str(&content).ok()
+}
+
+/// Carga las refs; si no existen (proyecto anterior a los hilos), las inicializa desde el
+/// historial. No persiste por sí sola: quien mute las refs debe llamar a `save_refs`.
+pub fn load_or_init_refs(project_dir: &std::path::Path, history: &History) -> Refs {
+    load_refs(project_dir).unwrap_or_else(|| init_refs_from_history(history))
+}
+
+/// Guarda las refs de forma atómica en `.ito/refs.toml`.
+pub fn save_refs(project_dir: &std::path::Path, refs: &Refs) -> Result<(), String> {
+    let content = toml::to_string_pretty(refs)
+        .map_err(|e| format!("Error al serializar refs: {}", e))?;
+    write_atomic(&refs_path(project_dir), &content)
+        .map_err(|e| format!("Error al escribir refs: {}", e))
+}
+
 /// Escribe un archivo de forma atómica: primero a un temporal en el MISMO directorio (mismo volumen,
 /// para que el rename sea atómico) y luego lo renombra sobre el destino. Evita que un crash a mitad
 /// de escritura deje metadatos críticos (p. ej. history.toml) truncados o corruptos.
@@ -204,19 +273,20 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
         History::default()
     };
 
-    let parent_hash = history
-        .commits
-        .last()
-        .map(|c| c.hash.clone())
-        .unwrap_or_else(|| "0000000000000000000000000000000000000000000000000000000000000000".to_string());
+    // Hilos: el padre de este commit es la PUNTA del hilo activo (HEAD), no el último commit
+    // global del historial. En proyectos anteriores a los hilos (sin refs.toml) se migra creando
+    // `principal` sobre el último commit; con un solo hilo el comportamiento es idéntico al de antes.
+    let mut refs = load_or_init_refs(&project_dir, &history);
+    let parent_hash = refs.head_tip();
 
-    // Detección de cambios por CONTENIDO: si el estado actual es idéntico al del último commit
-    // (mismo tree_hash), no hay nada que confirmar. Los commits legados sin tree_hash (campo vacío)
-    // no bloquean el commit para no perder la capacidad de versionar en repos antiguos.
-    if let Some(last) = history.commits.last() {
-        if !last.tree_hash.is_empty() && last.tree_hash == tree_hash {
-            return Err("No hay cambios pendientes en ningún módulo para confirmar.".to_string());
-        }
+    // Detección de cambios por CONTENIDO contra la punta del hilo actual: si el estado es idéntico
+    // (mismo tree_hash), no hay nada que confirmar. Los commits legados sin tree_hash no bloquean.
+    let tip_unchanged = history.commits.iter()
+        .find(|c| c.hash == parent_hash)
+        .map(|tip| !tip.tree_hash.is_empty() && tip.tree_hash == tree_hash)
+        .unwrap_or(false);
+    if tip_unchanged {
+        return Err("No hay cambios pendientes en ningún módulo para confirmar.".to_string());
     }
 
     // El id del commit es un hash del estado (tree) + el padre + mensaje + timestamp; así dos commits
@@ -310,6 +380,11 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
         .map_err(|e| format!("Error al serializar historial: {}", e))?;
     write_atomic(&history_path, &history_str)
         .map_err(|e| format!("Error al escribir historial: {}", e))?;
+
+    // Avanzar la punta del hilo activo a este commit y persistir las refs. Así el próximo commit
+    // colgará de este, y (cuando existan varios hilos) cada uno avanza de forma independiente.
+    refs.hilos.insert(refs.head.clone(), hash_str.clone());
+    save_refs(&project_dir, &refs)?;
 
     Ok(commit_entry)
 }
@@ -2214,6 +2289,65 @@ mod tests {
         assert!(err_res.is_err());
 
         // Limpiar
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_hilos_refs_avanzan_con_commits() {
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-hilos-{}", unique_id));
+        let (project_path, _) = run_new(temp_dir.clone(), "ProyectoHilos").unwrap();
+
+        // Antes del primer commit no hay refs.toml.
+        assert!(load_refs(&project_path).is_none());
+
+        // Primer commit: crea el hilo `principal` apuntando a ese commit.
+        std::fs::write(project_path.join("documentation").join("a.txt"), "1").unwrap();
+        let c1 = run_commit(project_path.clone(), Some("uno".to_string())).unwrap();
+        let refs = load_refs(&project_path).expect("refs.toml debe existir tras el commit");
+        assert_eq!(refs.head, DEFAULT_HILO);
+        assert_eq!(refs.head_tip(), c1.hash);
+        assert_eq!(c1.parent_hash, ZERO_HASH);
+
+        // Segundo commit: la punta del hilo avanza y el nuevo cuelga del anterior.
+        std::fs::write(project_path.join("documentation").join("a.txt"), "2").unwrap();
+        let c2 = run_commit(project_path.clone(), Some("dos".to_string())).unwrap();
+        let refs = load_refs(&project_path).unwrap();
+        assert_eq!(refs.head_tip(), c2.hash);
+        assert_eq!(c2.parent_hash, c1.hash);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_hilos_migracion_desde_historial_viejo() {
+        // Un proyecto con historial pero SIN refs.toml (estado de las versiones anteriores):
+        // debe migrarse creando `principal` sobre el último commit, sin perder nada.
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-migra-{}", unique_id));
+        let (project_path, _) = run_new(temp_dir.clone(), "ProyectoViejo").unwrap();
+
+        std::fs::write(project_path.join("documentation").join("a.txt"), "1").unwrap();
+        let c1 = run_commit(project_path.clone(), Some("uno".to_string())).unwrap();
+
+        // Simular proyecto legado: borrar refs.toml dejando solo el historial.
+        std::fs::remove_file(refs_path(&project_path)).unwrap();
+        assert!(load_refs(&project_path).is_none());
+
+        // init_refs_from_history reconstruye `principal` sobre el último commit.
+        let history: History = toml::from_str(
+            &std::fs::read_to_string(project_path.join(".ito").join("history.toml")).unwrap()
+        ).unwrap();
+        let migrated = init_refs_from_history(&history);
+        assert_eq!(migrated.head, DEFAULT_HILO);
+        assert_eq!(migrated.head_tip(), c1.hash);
+
+        // Y un commit nuevo cuelga del último aunque el proyecto haya nacido sin refs.
+        std::fs::write(project_path.join("documentation").join("a.txt"), "2").unwrap();
+        let c2 = run_commit(project_path.clone(), Some("dos".to_string())).unwrap();
+        assert_eq!(c2.parent_hash, c1.hash);
+        assert_eq!(load_refs(&project_path).unwrap().head_tip(), c2.hash);
+
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
