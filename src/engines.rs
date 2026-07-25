@@ -31,7 +31,8 @@ pub trait Engine: Send + Sync {
     fn name(&self) -> &str;
     fn detect(&self, path: &Path) -> bool;
     fn status(&self, path: &Path, cache_dir: &Path) -> Result<ModuleStatus, String>;
-    fn commit(&self, path: &Path, backup_dir: &Path, cache_dir: &Path) -> Result<CommitPayload, String>;
+    /// `excluded`: carpetas dentro de `path` que NO deben capturarse porque son otros módulos.
+    fn commit(&self, path: &Path, backup_dir: &Path, cache_dir: &Path, excluded: &[PathBuf]) -> Result<CommitPayload, String>;
     fn restore(&self, path: &Path, backup_dir: &Path, payload: &CommitPayload) -> Result<(), String>;
 }
 
@@ -73,7 +74,7 @@ impl Engine for GitEngine {
         }
     }
 
-    fn commit(&self, path: &Path, _backup_dir: &Path, _cache_dir: &Path) -> Result<CommitPayload, String> {
+    fn commit(&self, path: &Path, _backup_dir: &Path, _cache_dir: &Path, _excluded: &[PathBuf]) -> Result<CommitPayload, String> {
         let output = std::process::Command::new("git")
             .args(&["rev-parse", "--short", "HEAD"])
             .current_dir(path)
@@ -104,14 +105,12 @@ impl Engine for GitEngine {
         })
     }
 
-    fn restore(&self, path: &Path, _backup_dir: &Path, payload: &CommitPayload) -> Result<(), String> {
-        if let Some(git_commit) = payload.metadata.get("git_commit") {
-            println!("Ejecutando git checkout {}...", git_commit);
-            let _ = std::process::Command::new("git")
-                .args(&["checkout", git_commit])
-                .current_dir(path)
-                .status();
-        }
+    fn restore(&self, _path: &Path, _backup_dir: &Path, _payload: &CommitPayload) -> Result<(), String> {
+        // ITO NO toca el repositorio de git del código. El versionado del firmware es de git y de
+        // los programadores: si otra persona del equipo restaura una versión de hardware, no puede
+        // arrancarles los cambios del código de las manos. ITO solo REGISTRA con qué commit de git
+        // se guardó cada versión (ver `commit`) y lo informa. La alineación opcional del código la
+        // decide el usuario con `--con-codigo`, y la maneja la capa superior (lib) con salvaguardas.
         Ok(())
     }
 }
@@ -119,23 +118,28 @@ impl Engine for GitEngine {
 // ----------------------------------------------------
 // Auxiliar: Escaneo recursivo respetando ignores
 // ----------------------------------------------------
+/// `excluded` lista carpetas que NO deben escanearse aunque estén dentro de `root`. Se usa para que
+/// un módulo cuya carpeta engloba a otros (típicamente "electronics" cuando cae a la raíz del
+/// proyecto) no se trague las carpetas que son OTROS módulos (firmware/, mecánica, carpetas
+/// personalizadas): esas las versiona su propio motor y ITO no debe duplicarlas ni pisarlas.
 fn scan_directory_recursive(
     root: &Path,
     current: &Path,
     filter: &IgnoreFilter,
     files: &mut Vec<PathBuf>,
+    excluded: &[PathBuf],
 ) {
-    if filter.is_ignored(current) {
+    if filter.is_ignored(current) || excluded.iter().any(|e| current == e.as_path()) {
         return;
     }
     if let Ok(entries) = std::fs::read_dir(current) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if filter.is_ignored(&path) {
+            if filter.is_ignored(&path) || excluded.iter().any(|e| path == e.as_path()) {
                 continue;
             }
             if path.is_dir() {
-                scan_directory_recursive(root, &path, filter, files);
+                scan_directory_recursive(root, &path, filter, files, excluded);
             } else if path.is_file() {
                 files.push(path);
             }
@@ -151,7 +155,7 @@ fn scan_directory_recursive(
 ///   Si el directorio no es un repo git válido, cae al escaneo de contenido como respaldo.
 /// - Resto de motores: Merkle simple de los hashes SHA-256 del contenido de cada archivo rastreado
 ///   (respetando `.itoignore`), ordenado por ruta para ser determinista.
-pub fn compute_module_content_id(engine_name: &str, path: &Path) -> String {
+pub fn compute_module_content_id(engine_name: &str, path: &Path, excluded: &[PathBuf]) -> String {
     if engine_name == "git" {
         let output = std::process::Command::new("git")
             .args(&["rev-parse", "HEAD"])
@@ -168,7 +172,7 @@ pub fn compute_module_content_id(engine_name: &str, path: &Path) -> String {
 
     let filter = IgnoreFilter::new(path);
     let mut files = Vec::new();
-    scan_directory_recursive(path, path, &filter, &mut files);
+    scan_directory_recursive(path, path, &filter, &mut files, excluded);
 
     let mut entries: Vec<(String, String)> = Vec::new();
     for f in files {
@@ -355,7 +359,7 @@ impl Engine for SemanticCadEngine {
         }
     }
 
-    fn commit(&self, path: &Path, backup_dir: &Path, cache_dir: &Path) -> Result<CommitPayload, String> {
+    fn commit(&self, path: &Path, backup_dir: &Path, cache_dir: &Path, excluded: &[PathBuf]) -> Result<CommitPayload, String> {
         let mut changes_detected = false;
         let mut details = Vec::new();
         let mut metadata = HashMap::new();
@@ -373,7 +377,7 @@ impl Engine for SemanticCadEngine {
 
         let filter = IgnoreFilter::new(path);
         let mut current_files = Vec::new();
-        scan_directory_recursive(path, path, &filter, &mut current_files);
+        scan_directory_recursive(path, path, &filter, &mut current_files, excluded);
 
         let mut current_hashes = HashMap::new();
         for file_path in current_files {
@@ -386,7 +390,7 @@ impl Engine for SemanticCadEngine {
 
         std::fs::create_dir_all(backup_dir).ok();
         let manifest_content = serde_json::to_string_pretty(&current_hashes).unwrap_or_default();
-        
+
         let backup_manifest = backup_dir.join("manifest.json");
         std::fs::write(&backup_manifest, &manifest_content).ok();
 
@@ -451,7 +455,7 @@ impl Engine for FileHashEngine {
     fn status(&self, path: &Path, cache_dir: &Path) -> Result<ModuleStatus, String> {
         let filter = IgnoreFilter::new(path);
         let mut current_files = Vec::new();
-        scan_directory_recursive(path, path, &filter, &mut current_files);
+        scan_directory_recursive(path, path, &filter, &mut current_files, &[]);
 
         let mut current_hashes = HashMap::new();
         for file_path in current_files {
@@ -516,7 +520,7 @@ impl Engine for FileHashEngine {
         }
     }
 
-    fn commit(&self, path: &Path, backup_dir: &Path, cache_dir: &Path) -> Result<CommitPayload, String> {
+    fn commit(&self, path: &Path, backup_dir: &Path, cache_dir: &Path, excluded: &[PathBuf]) -> Result<CommitPayload, String> {
         let mut changes_detected = false;
         let mut details = Vec::new();
         let mut metadata = HashMap::new();
@@ -534,7 +538,7 @@ impl Engine for FileHashEngine {
 
         let filter = IgnoreFilter::new(path);
         let mut current_files = Vec::new();
-        scan_directory_recursive(path, path, &filter, &mut current_files);
+        scan_directory_recursive(path, path, &filter, &mut current_files, excluded);
 
         let mut current_hashes = HashMap::new();
         for file_path in current_files {

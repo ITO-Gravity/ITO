@@ -244,6 +244,20 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
         }
     }
 
+    // Para cada módulo, excluir del escaneo las carpetas de OTROS módulos que caigan dentro de su
+    // ruta. Así "electronics" —si por falta de CAD cae a la raíz del proyecto— NO se traga
+    // firmware/, mecánica ni las carpetas personalizadas: cada una la versiona su propio motor.
+    // (Sin esto, restaurar electrónica pisaba archivos del código, contradiciendo la promesa de
+    // que ITO no toca el firmware.)
+    let all_module_paths: Vec<std::path::PathBuf> =
+        active_modules.iter().map(|(_, p, _)| p.clone()).collect();
+    let exclusions_for = |target: &std::path::Path| -> Vec<std::path::PathBuf> {
+        all_module_paths.iter()
+            .filter(|p| p.as_path() != target && p.starts_with(target))
+            .cloned()
+            .collect()
+    };
+
     // 2. Calcular el tree_hash: Merkle del CONTENIDO real de todos los módulos.
     //    A diferencia del esquema anterior (que hasheaba el texto del resumen del diff), este id
     //    es un compromiso criptográfico del estado de los archivos, por lo que dos ediciones
@@ -253,7 +267,7 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
 
     let mut tree_hasher = Sha256::new();
     for (key, module_path, engine_name) in &modules_for_tree {
-        let content_id = engines::compute_module_content_id(engine_name, module_path);
+        let content_id = engines::compute_module_content_id(engine_name, module_path, &exclusions_for(module_path));
         tree_hasher.update(key.as_bytes());
         tree_hasher.update(b"\0");
         tree_hasher.update(engine_name.as_bytes());
@@ -349,7 +363,7 @@ pub fn run_commit(project_dir: std::path::PathBuf, message: Option<String>) -> R
             None
         };
 
-        let payload = engine.commit(&module_path, &m_backup_dir, &m_cache_dir)?;
+        let payload = engine.commit(&module_path, &m_backup_dir, &m_cache_dir, &exclusions_for(&module_path))?;
 
         if key == "electronics" {
             diff_summary = diff_summary_val;
@@ -416,26 +430,63 @@ pub fn bump_revision(project_dir: &std::path::Path) -> Result<String, String> {
     Ok(new_rev)
 }
 
-pub fn run_restore(project_dir: std::path::PathBuf, target_hash: &str) -> Result<Vec<String>, String> {
-    let history_path = project_dir.join(".ito").join("history.toml");
-    if !history_path.exists() {
-        return Err("No se encontró el historial del proyecto. ¿Ejecutaste 'ito commit' primero?".to_string());
+/// Aviso sobre el módulo de código (firmware) al restaurar o cambiar de hilo. ITO no toca git por
+/// su cuenta: informa con qué commit de git corresponde la versión y, si el usuario lo pidió con
+/// `--con-codigo`, intenta alinear el código con salvaguardas.
+#[derive(Debug, Clone)]
+pub struct FirmwareNote {
+    pub module: String,
+    /// Commit de git con el que se guardó esta versión (si quedó registrado).
+    pub expected_git: Option<String>,
+    /// Commit de git en el que está el repo ahora mismo.
+    pub current_git: Option<String>,
+    /// Si ITO efectivamente movió el código (solo con `--con-codigo`).
+    pub applied: bool,
+    /// Motivo por el que no se alineó el código, cuando se pidió pero no se pudo.
+    pub blocked_reason: Option<String>,
+}
+
+/// Resultado de restaurar/cambiar: qué módulos de hardware se restauraron y qué avisos de código hay.
+#[derive(Debug, Clone, Default)]
+pub struct RestoreOutcome {
+    pub restored: Vec<String>,
+    pub firmware: Vec<FirmwareNote>,
+}
+
+fn git_short_head(path: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"]).current_dir(path).output().ok()?;
+    if !out.status.success() { return None; }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+fn git_is_dirty(path: &std::path::Path) -> bool {
+    match std::process::Command::new("git")
+        .args(["status", "--porcelain"]).current_dir(path).output() {
+        Ok(out) => !String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        Err(_) => false,
     }
+}
 
-    // 1. Cargar historial
-    let content = std::fs::read_to_string(&history_path)
-        .map_err(|e| format!("Error al leer historial: {}", e))?;
-    let history: History = toml::from_str(&content)
-        .map_err(|e| format!("Error al parsear historial: {}", e))?;
+fn load_history(project_dir: &std::path::Path) -> History {
+    let history_path = project_dir.join(".ito").join("history.toml");
+    std::fs::read_to_string(&history_path).ok()
+        .and_then(|c| toml::from_str(&c).ok())
+        .unwrap_or_default()
+}
 
-    // 2. Buscar el commit por prefijo
-    let matched_commit = history.commits.iter().find(|c| c.hash.starts_with(target_hash))
-        .ok_or_else(|| format!("No se encontró ninguna versión con el prefijo de hash '{}'.", target_hash))?;
-
+/// Núcleo de restauración a un commit concreto. Restaura los módulos de hardware desde el CAS y,
+/// para el firmware (motor git), NO toca el código: genera un aviso y, solo si `move_code` es true,
+/// intenta alinear el git del código con salvaguardas (no pisa cambios sin commitear).
+fn restore_to_commit(
+    project_dir: &std::path::Path,
+    matched_commit: &CommitEntry,
+    move_code: bool,
+) -> Result<RestoreOutcome, String> {
     let registry = engines::EngineRegistry::new();
-    let mut restored_modules = Vec::new();
+    let mut outcome = RestoreOutcome::default();
 
-    // 3. Restauración modular transaccional
     if !matched_commit.modules.is_empty() {
         let ito_json_path = project_dir.join("ito.json");
         let mut links = std::collections::HashMap::new();
@@ -457,40 +508,172 @@ pub fn run_restore(project_dir: std::path::PathBuf, target_hash: &str) -> Result
                 }
             } else if key == "electronics" {
                 // Misma resolución que run_commit para restaurar donde vive el diseño.
-                resolve_electronics_dir(&project_dir)
+                resolve_electronics_dir(project_dir)
             } else {
                 // Módulo sin link (carpeta local homónima: firmware/, documentation/ o una carpeta
                 // personalizada del usuario). Antes se salteaba y el módulo nunca se restauraba.
                 project_dir.join(key)
             };
 
+            // Firmware / código versionado por git: ITO no lo toca por defecto. Avisa, y solo con
+            // --con-codigo intenta alinearlo (nunca si hay cambios sin commitear).
+            if payload.engine_name == "git" {
+                let expected = payload.metadata.get("git_commit").cloned();
+                let current = git_short_head(&path);
+                let mut applied = false;
+                let mut blocked = None;
+                if move_code {
+                    match &expected {
+                        Some(target) => {
+                            if git_is_dirty(&path) {
+                                blocked = Some("el firmware tiene cambios sin commitear; ITO no los va a pisar. Guardalos con git (commit o stash) y reintentá con --con-codigo".to_string());
+                            } else {
+                                let ok = std::process::Command::new("git")
+                                    .args(["checkout", target]).current_dir(&path).status()
+                                    .map(|s| s.success()).unwrap_or(false);
+                                applied = ok;
+                                if !ok {
+                                    blocked = Some("no se pudo alinear el firmware con git".to_string());
+                                }
+                            }
+                        }
+                        None => {
+                            blocked = Some("esta versión no registró el commit de git del firmware".to_string());
+                        }
+                    }
+                }
+                outcome.firmware.push(FirmwareNote {
+                    module: key.clone(),
+                    expected_git: expected,
+                    current_git: current,
+                    applied,
+                    blocked_reason: blocked,
+                });
+                continue;
+            }
+
             let engine = registry.get_engine(&payload.engine_name)
                 .unwrap_or_else(|| registry.get_engine("file-hash").unwrap());
 
             let m_backup_dir = project_dir.join(".ito").join("backups").join(&matched_commit.hash).join(key);
             engine.restore(&path, &m_backup_dir, payload)?;
-            restored_modules.push(key.clone());
+            outcome.restored.push(key.clone());
         }
     } else {
         // Fallback V1
         let engine = registry.get_engine("semantic-cad").unwrap();
         let m_backup_dir = project_dir.join(".ito").join("backups");
-        
+
         let mut metadata = std::collections::HashMap::new();
         metadata.insert("zip_file".to_string(), format!("{}.zip", matched_commit.hash));
-        
+
         let payload = engines::CommitPayload {
             engine_name: "semantic-cad".to_string(),
             changes_detected: true,
             details: Vec::new(),
             metadata,
         };
-        
-        engine.restore(&project_dir, &m_backup_dir, &payload)?;
-        restored_modules.push("electronics".to_string());
+
+        engine.restore(project_dir, &m_backup_dir, &payload)?;
+        outcome.restored.push("electronics".to_string());
     }
 
-    Ok(restored_modules)
+    Ok(outcome)
+}
+
+/// Restaura una versión puntual (por prefijo de hash) SIN cambiar de hilo. Devuelve el detalle
+/// completo (módulos restaurados + avisos de firmware). `move_code` alinea el código (--con-codigo).
+pub fn run_restore_ex(project_dir: std::path::PathBuf, target_hash: &str, move_code: bool) -> Result<RestoreOutcome, String> {
+    let history_path = project_dir.join(".ito").join("history.toml");
+    if !history_path.exists() {
+        return Err("No se encontró el historial del proyecto. ¿Ejecutaste 'ito commit' primero?".to_string());
+    }
+    let content = std::fs::read_to_string(&history_path)
+        .map_err(|e| format!("Error al leer historial: {}", e))?;
+    let history: History = toml::from_str(&content)
+        .map_err(|e| format!("Error al parsear historial: {}", e))?;
+
+    let matched_commit = history.commits.iter().find(|c| c.hash.starts_with(target_hash))
+        .cloned()
+        .ok_or_else(|| format!("No se encontró ninguna versión con el prefijo de hash '{}'.", target_hash))?;
+
+    restore_to_commit(&project_dir, &matched_commit, move_code)
+}
+
+/// Envoltorio retrocompatible: restaura y devuelve solo la lista de módulos de hardware.
+pub fn run_restore(project_dir: std::path::PathBuf, target_hash: &str) -> Result<Vec<String>, String> {
+    Ok(run_restore_ex(project_dir, target_hash, false)?.restored)
+}
+
+/// Valida el nombre de un hilo: un solo token, sin espacios ni barras, caracteres seguros.
+pub fn normalize_hilo_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("El nombre del hilo no puede estar vacío.".to_string());
+    }
+    if name.chars().count() > 40 {
+        return Err("El nombre del hilo es demasiado largo (máximo 40 caracteres).".to_string());
+    }
+    if name.chars().any(|c| c.is_whitespace()) {
+        return Err("El nombre del hilo no puede tener espacios. Usá guiones, ej. 'prueba-sensor'.".to_string());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("El nombre del hilo no puede tener barras.".to_string());
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        return Err("El nombre del hilo solo admite letras, números, guiones, guion bajo y punto.".to_string());
+    }
+    if name.starts_with('.') {
+        return Err("El nombre del hilo no puede empezar con punto.".to_string());
+    }
+    Ok(name.to_string())
+}
+
+/// Lista los hilos del proyecto: devuelve (hilo_activo, [(nombre, hash_de_la_punta)] ordenado).
+pub fn list_hilos(project_dir: &std::path::Path) -> (String, Vec<(String, String)>) {
+    let history = load_history(project_dir);
+    let refs = load_or_init_refs(project_dir, &history);
+    let mut hilos: Vec<(String, String)> = refs.hilos.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    hilos.sort();
+    (refs.head, hilos)
+}
+
+/// Crea un hilo nuevo desde la punta del hilo actual y salta a él. Devuelve el nombre normalizado.
+pub fn run_hilo_create(project_dir: std::path::PathBuf, raw_name: &str) -> Result<String, String> {
+    let name = normalize_hilo_name(raw_name)?;
+    let history = load_history(&project_dir);
+    if history.commits.is_empty() {
+        return Err("Todavía no hay ninguna versión guardada. Guardá una con 'ito commit -m \"...\"' antes de abrir un hilo.".to_string());
+    }
+    let mut refs = load_or_init_refs(&project_dir, &history);
+    if refs.hilos.contains_key(&name) {
+        return Err(format!("El hilo '{}' ya existe. Cambiá a él con: ito cambiar {}", name, name));
+    }
+    // El hilo nuevo arranca en la misma versión donde estás: no cambia ningún archivo.
+    let tip = refs.head_tip();
+    refs.hilos.insert(name.clone(), tip);
+    refs.head = name.clone();
+    save_refs(&project_dir, &refs)?;
+    Ok(name)
+}
+
+/// Cambia de hilo: restaura el directorio de trabajo a la punta de ese hilo y mueve HEAD.
+/// `move_code` alinea también el firmware (--con-codigo). No toca el código por defecto.
+pub fn run_cambiar(project_dir: std::path::PathBuf, name: &str, move_code: bool) -> Result<RestoreOutcome, String> {
+    let history = load_history(&project_dir);
+    let mut refs = load_or_init_refs(&project_dir, &history);
+    let tip = refs.hilos.get(name).cloned()
+        .ok_or_else(|| format!("No existe el hilo '{}'. Mirá los hilos con 'ito hilo' o creá uno con 'ito hilo {}'.", name, name))?;
+
+    let matched_commit = history.commits.iter().find(|c| c.hash == tip)
+        .cloned()
+        .ok_or_else(|| format!("El hilo '{}' apunta a una versión inexistente ({}).", name, short_hash(&tip)))?;
+
+    let outcome = restore_to_commit(&project_dir, &matched_commit, move_code)?;
+
+    refs.head = name.to_string();
+    save_refs(&project_dir, &refs)?;
+    Ok(outcome)
 }
 
 pub fn run_new(cwd: std::path::PathBuf, project_name: &str) -> Result<(std::path::PathBuf, String), String> {
@@ -2348,6 +2531,133 @@ mod tests {
         assert_eq!(c2.parent_hash, c1.hash);
         assert_eq!(load_refs(&project_path).unwrap().head_tip(), c2.hash);
 
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_normalize_hilo_name() {
+        assert_eq!(normalize_hilo_name("  prueba-sensor ").unwrap(), "prueba-sensor");
+        assert_eq!(normalize_hilo_name("v2_final.1").unwrap(), "v2_final.1");
+        assert!(normalize_hilo_name("con espacio").is_err());
+        assert!(normalize_hilo_name("a/b").is_err());
+        assert!(normalize_hilo_name(".oculto").is_err());
+        assert!(normalize_hilo_name("raro!").is_err());
+        assert!(normalize_hilo_name("").is_err());
+    }
+
+    #[test]
+    fn test_hilos_crear_cambiar_y_divergir() {
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-hiloflow-{}", unique_id));
+        let (p, _) = run_new(temp_dir.clone(), "ProyHilo").unwrap();
+        let file = p.join("documentation").join("estado.txt");
+
+        // Versión base en el hilo principal.
+        std::fs::write(&file, "base").unwrap();
+        let c1 = run_commit(p.clone(), Some("base".to_string())).unwrap();
+
+        // Abrir un hilo nuevo: arranca en la misma versión y no cambia archivos.
+        assert_eq!(run_hilo_create(p.clone(), "prueba").unwrap(), "prueba");
+        let (head, hilos) = list_hilos(&p);
+        assert_eq!(head, "prueba");
+        assert_eq!(hilos.len(), 2);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "base");
+
+        // Commit en «prueba»: avanza prueba; «principal» queda en c1 (divergen).
+        std::fs::write(&file, "experimento").unwrap();
+        let c2 = run_commit(p.clone(), Some("experimento".to_string())).unwrap();
+        let refs = load_refs(&p).unwrap();
+        assert_eq!(refs.hilos.get("prueba").unwrap(), &c2.hash);
+        assert_eq!(refs.hilos.get("principal").unwrap(), &c1.hash);
+        assert_eq!(c2.parent_hash, c1.hash);
+
+        // Volver a «principal»: el archivo vuelve a "base".
+        run_cambiar(p.clone(), "principal", false).unwrap();
+        assert_eq!(load_refs(&p).unwrap().head, "principal");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "base");
+
+        // Volver a «prueba»: recupera "experimento".
+        run_cambiar(p.clone(), "prueba", false).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "experimento");
+
+        // No se puede crear un hilo repetido, ni cambiar a uno inexistente.
+        assert!(run_hilo_create(p.clone(), "prueba").is_err());
+        assert!(run_cambiar(p.clone(), "noexiste", false).is_err());
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_electronics_no_captura_otros_modulos_en_manifiesto() {
+        // Bug serio: cuando electrónica no tiene CAD y cae a la raíz, NO debe capturar las carpetas
+        // que son otros módulos. Verificamos a nivel manifiesto (sin depender de git).
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-overlap-{}", unique_id));
+        let (p, _) = run_new(temp_dir.clone(), "ProyOverlap").unwrap();
+
+        // "codigo" es un módulo aparte (carpeta personalizada, motor file-hash).
+        run_new_folder(&p, "codigo").unwrap();
+        std::fs::write(p.join("codigo").join("main.cpp"), "codigo v1").unwrap();
+        // Un archivo de "hardware" en la raíz, que sí es del módulo electronics.
+        std::fs::write(p.join("nota_hw.txt"), "hardware v1").unwrap();
+        run_commit(p.clone(), Some("v1".to_string())).unwrap();
+
+        // El manifiesto de electrónica debe tener el archivo de la raíz pero NO los de "codigo".
+        let elec_manifest = p.join(".ito").join("cache").join("electronics").join("manifest.json");
+        let manifest: std::collections::HashMap<String, String> = serde_json::from_str(
+            &std::fs::read_to_string(&elec_manifest).unwrap()
+        ).unwrap();
+        assert!(manifest.keys().any(|k| k.contains("nota_hw.txt")),
+            "electronics debe rastrear el archivo de hardware de la raíz");
+        assert!(!manifest.keys().any(|k| k.contains("codigo")),
+            "electronics NO debe rastrear la carpeta 'codigo' (otro módulo): {:?}", manifest.keys().collect::<Vec<_>>());
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_restore_no_pisa_el_firmware_git() {
+        // El escenario real del bug: firmware como repo git aparte, sin CAD (electrónica cae a la
+        // raíz). Restaurar una versión vieja NO debe tocar el código del firmware.
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-fwgit-{}", unique_id));
+        let (p, _) = run_new(temp_dir.clone(), "ProyFw").unwrap();
+        let fw = p.join("firmware");
+
+        let git_ok = std::process::Command::new("git").args(["init", "-q"])
+            .current_dir(&fw).status().map(|s| s.success()).unwrap_or(false);
+        if !git_ok { std::fs::remove_dir_all(&temp_dir).ok(); return; } // entorno sin git: saltar
+        let git = |args: &[&str]| { let _ = std::process::Command::new("git").args(args).current_dir(&fw).status(); };
+        git(&["config", "user.email", "t@t.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(fw.join("main.cpp"), "codigo v1").unwrap();
+        git(&["add", "-A"]); git(&["commit", "-qm", "fw v1"]);
+
+        run_link(p.clone(), "firmware", std::path::PathBuf::from("firmware")).unwrap();
+        std::fs::write(p.join("nota_hw.txt"), "hw v1").unwrap();
+        let c1 = run_commit(p.clone(), Some("v1".to_string())).unwrap();
+
+        // El código avanza a v2 (trabajo en curso del programador).
+        std::fs::write(fw.join("main.cpp"), "codigo v2 EN PROGRESO").unwrap();
+        git(&["add", "-A"]); git(&["commit", "-qm", "fw v2"]);
+
+        // Restaurar v1 sin --con-codigo: el código queda INTACTO y solo hay aviso.
+        let outcome = run_restore_ex(p.clone(), &c1.hash, false).unwrap();
+        assert_eq!(std::fs::read_to_string(fw.join("main.cpp")).unwrap(), "codigo v2 EN PROGRESO",
+            "restore no debe tocar el código del firmware");
+        assert!(outcome.firmware.iter().any(|n| n.module == "firmware"),
+            "debe haber un aviso de firmware");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_hilo_requiere_commit_previo() {
+        // Abrir un hilo sin ninguna versión guardada debe fallar con mensaje claro.
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(format!("ito-hilonocommit-{}", unique_id));
+        let (p, _) = run_new(temp_dir.clone(), "ProyVacio").unwrap();
+        assert!(run_hilo_create(p.clone(), "prueba").is_err());
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 

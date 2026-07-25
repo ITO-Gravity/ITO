@@ -62,7 +62,9 @@ El uso de la CLI está estructurado con base en estándares de comandos de Git y
 | `ito diff` | Muestra diferencias semánticas detalladas de componentes y redes (nets) contra la última caché. |
 | `ito commit [-m "msg"]` | Ejecuta el linter eléctrico (ERC) y guarda una instantánea inmutable en el historial y el CAS. |
 | `ito log` | Muestra el historial completo de commits del proyecto y el resumen de cambios numéricos. |
-| `ito restore <hash>` | Restaura todos los módulos al commit indicado (acepta el hash corto). Pide confirmación porque sobrescribe el trabajo actual; `-y`/`--yes` la omite para scripts. |
+| `ito restore <hash>` | Restaura todos los módulos al commit indicado (acepta el hash corto). Pide confirmación porque sobrescribe el trabajo actual; `-y`/`--yes` la omite. No toca el código (firmware): solo informa; `--con-codigo` lo alinea también (ver Hilos y firmware). |
+| `ito hilo [<nombre>]` | Sin argumento, lista los hilos y marca el actual. Con nombre, abre un hilo nuevo (una línea de versiones paralela) desde donde estás y salta a él. |
+| `ito cambiar <nombre>` | Cambia de hilo, trayendo su versión al directorio de trabajo (alias `ito switch`; `-y` omite la confirmación; `--con-codigo` alinea también el firmware). |
 | `ito lint` | Ejecuta de forma estática reglas de diseño eléctrico semántico (ERC) sobre los módulos de electrónica. |
 | `ito workspace` | Muestra la ruta física del Workspace global y el conteo de proyectos registrados. |
 | `ito workspace set [ruta]` | Configura o cambia el directorio de trabajo del Workspace global. |
@@ -79,7 +81,29 @@ El uso de la CLI está estructurado con base en estándares de comandos de Git y
 
 ---
 
-## 3. Linter Eléctrico: Reglas de Diseño Semántico (ERC)
+## 3. Hilos: probar sin romper lo bueno
+
+Un **hilo** es una línea de versiones paralela. Sirve para probar una idea sin tocar la versión estable: si no funciona, volvés y el experimento no dejó rastro. ITO llama "hilos" a sus ramas a propósito, para no confundirlas con las **ramas de git** del código (git = ramas, ITO = hilos).
+
+```
+ito hilo                 # ¿en qué hilo estoy? lista todos
+ito hilo experimento     # abro un hilo nuevo desde acá y salto a él
+# ... pruebo cosas y hago 'ito commit' las veces que quiera ...
+ito cambiar principal    # no me convenció: vuelvo al hilo estable
+ito cambiar experimento  # si quiero, retomo el experimento donde lo dejé
+```
+
+Cada proyecto arranca con un hilo `principal`. Los proyectos creados con versiones anteriores lo adquieren automáticamente al primer comando, sin perder su historial.
+
+### Firmware y código: ITO no lo toca
+
+El versionado del **código** es de git y de los programadores. Por eso `ito restore` y `ito cambiar` **nunca** modifican el repositorio de git del firmware: si alguien del equipo restaura una versión de hardware, no le arranca los cambios del código a quien lo está programando. ITO solo **informa** con qué commit de git corresponde cada versión.
+
+Si querés alinear el código a mano, usá el `git checkout` que ITO te sugiere. Si preferís que ITO lo alinee por vos, agregá `--con-codigo`; aun así, ITO **nunca** pisa cambios sin commitear (si el firmware está "sucio", frena y te avisa).
+
+---
+
+## 4. Linter Eléctrico: Reglas de Diseño Semántico (ERC)
 
 El comando `ito lint` realiza auditorías de integridad de circuitos con las siguientes reglas (código y severidad):
 1.  **`E001_FLOATING_INPUT`** (Advertencia): Pines de tipo entrada (`Input`) sin conexión a ninguna red eléctrica.
@@ -89,7 +113,7 @@ El comando `ito lint` realiza auditorías de integridad de circuitos con las sig
 
 ---
 
-## 4. Actualizaciones Automáticas
+## 5. Actualizaciones Automáticas
 
 ITO cuenta con un actualizador automático integrado conectado a GitHub Releases:
 - **Comprobación de fondo silenciosa**: Cada 24 horas, ITO realiza una consulta rápida (con un límite de 3 segundos de timeout) al iniciar cualquier comando ordinario para comprobar si existe una versión más nueva en GitHub de forma silenciosa.
@@ -98,7 +122,7 @@ ITO cuenta con un actualizador automático integrado conectado a GitHub Releases
 
 ---
 
-## 5. Desarrollo Local
+## 6. Desarrollo Local
 
 ### Prerrequisitos
 *   Rust (edición 2021) y `cargo`.

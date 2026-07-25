@@ -75,6 +75,29 @@ enum Commands {
         /// Restaura sin pedir confirmación (para scripts o uso no interactivo)
         #[arg(short = 'y', long)]
         yes: bool,
+
+        /// Alinea también el código (firmware) al commit de git de esa versión
+        #[arg(long = "con-codigo")]
+        con_codigo: bool,
+    },
+    /// Gestiona los hilos: líneas de versiones paralelas para probar sin romper lo bueno
+    Hilo {
+        /// Nombre del hilo a crear (si se omite, lista los hilos existentes)
+        name: Option<String>,
+    },
+    /// Cambia de hilo, trayendo su versión al directorio de trabajo
+    #[command(alias = "switch")]
+    Cambiar {
+        /// Nombre del hilo al que moverte
+        name: String,
+
+        /// Cambia sin pedir confirmación (para scripts o uso no interactivo)
+        #[arg(short = 'y', long)]
+        yes: bool,
+
+        /// Alinea también el código (firmware) al commit de git de ese hilo
+        #[arg(long = "con-codigo")]
+        con_codigo: bool,
     },
     /// Ejecuta reglas de diseño eléctrico semántico (ERC)
     Lint {
@@ -736,11 +759,13 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            println!("\n{}", "Historial de Revisiones de Hardware".bold());
-            println!("------------------------------------------------------------");
+            // Hilo actual y su punta (HEAD). En proyectos sin hilos migra a `principal` en memoria.
+            let refs = ito::load_or_init_refs(&root, &history);
+            let head_hash = refs.head_tip();
 
-            // La versión actual (HEAD) es el último commit del historial.
-            let head_hash = history.commits.last().map(|c| c.hash.clone()).unwrap_or_default();
+            println!("\n{}", "Historial de Revisiones de Hardware".bold());
+            println!("Hilo:    {}", refs.head.green().bold());
+            println!("------------------------------------------------------------");
 
             // Mostrar el último commit primero
             for commit in history.commits.iter().rev() {
@@ -792,7 +817,7 @@ async fn main() -> Result<()> {
 
             println!("\nNote: Si deseas restaurar tu diseño a una versión anterior, ejecuta: {}", "ito restore <hash_corto>".cyan());
         }
-        Commands::Restore { hash, yes } => {
+        Commands::Restore { hash, yes, con_codigo } => {
             use std::io::{self, Write};
             use colored::Colorize;
 
@@ -854,14 +879,139 @@ async fn main() -> Result<()> {
                 }
             }
 
-            match ito::run_restore(root, hash) {
-                Ok(restored_files) => {
+            match ito::run_restore_ex(root, hash, *con_codigo) {
+                Ok(outcome) => {
                     println!("\n{}", "Diseño de hardware restaurado correctamente con éxito.".green().bold());
-                    println!("Archivos recuperados:");
-                    for file in restored_files {
-                        println!("  - {}", file.cyan());
+                    if !outcome.restored.is_empty() {
+                        println!("Módulos recuperados:");
+                        for file in &outcome.restored {
+                            println!("  - {}", file.cyan());
+                        }
                     }
+                    print_firmware_notes(&outcome.firmware);
                     println!("\nNote: Puedes verificar el estado de tu diseño con: {}", "ito status".cyan());
+                }
+                Err(err) => {
+                    println!("{}", format!("Error: {}", err).red().bold());
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::Hilo { name } => {
+            use colored::Colorize;
+
+            let current_dir = std::env::current_dir()?;
+            let root = match ito::find_project_root(&current_dir) {
+                Some(r) => r,
+                None => {
+                    println!("{}", "Error: No se encontró la raíz del proyecto. Ejecutá este comando dentro de un proyecto de ITO.".red().bold());
+                    std::process::exit(1);
+                }
+            };
+
+            match name {
+                None => {
+                    // Listar los hilos, marcando el activo.
+                    let (head, hilos) = ito::list_hilos(&root);
+                    println!("\n{}", "Hilos del proyecto".bold());
+                    if hilos.is_empty() {
+                        println!("  {}", "Todavía no hay hilos. Se crean al guardar tu primera versión con 'ito commit'.".dimmed());
+                    } else {
+                        for (hilo, hash) in &hilos {
+                            let activo = *hilo == head;
+                            let marca = if activo { "*".green().bold().to_string() } else { " ".to_string() };
+                            let nombre = if activo { hilo.green().bold().to_string() } else { hilo.normal().to_string() };
+                            let suf = if activo { "  (actual)".green().to_string() } else { String::new() };
+                            println!("  {} {}   {}{}", marca, nombre, ito::short_hash(hash).dimmed(), suf);
+                        }
+                        println!("\nNote: Abrí un hilo nuevo con {} · Cambiá de hilo con {}", "ito hilo <nombre>".cyan(), "ito cambiar <nombre>".cyan());
+                    }
+                }
+                Some(n) => {
+                    match ito::run_hilo_create(root, n) {
+                        Ok(nombre) => {
+                            println!("\nHilo {} creado desde donde estabas.", nombre.green().bold());
+                            println!("Ya estás parado en {}. Probá tranquilo: lo que commitees acá no toca el hilo anterior.", nombre.cyan().bold());
+                            println!("\nNote: Volvé cuando quieras con: {}", "ito cambiar principal".cyan());
+                        }
+                        Err(err) => {
+                            println!("{}", format!("Error: {}", err).red().bold());
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Cambiar { name, yes, con_codigo } => {
+            use std::io::{self, Write};
+            use colored::Colorize;
+
+            let current_dir = std::env::current_dir()?;
+            let root = match ito::find_project_root(&current_dir) {
+                Some(r) => r,
+                None => {
+                    println!("{}", "Error: No se encontró la raíz del proyecto. Ejecutá este comando dentro de un proyecto de ITO.".red().bold());
+                    std::process::exit(1);
+                }
+            };
+
+            let (head, hilos) = ito::list_hilos(&root);
+            if *name == head {
+                println!("{}", format!("Ya estás en el hilo '{}'.", name).yellow());
+                return Ok(());
+            }
+            let tip = match hilos.iter().find(|(h, _)| h == name) {
+                Some((_, hash)) => hash.clone(),
+                None => {
+                    println!("{}", format!("Error: No existe el hilo '{}'.", name).red().bold());
+                    println!("Note: Mirá los hilos con {} o creá uno con {}", "ito hilo".cyan(), format!("ito hilo {}", name).cyan());
+                    std::process::exit(1);
+                }
+            };
+
+            // Cambiar de hilo trae al directorio de trabajo la versión de ese hilo: es destructivo
+            // sobre lo no guardado, igual que restore. Confirmamos salvo --yes.
+            if !*yes {
+                let cache_dir = root.join(".ito").join("cache").join("electronics");
+                let old_design = if cache_dir.exists() {
+                    parsers::parse_project_directory(&cache_dir).unwrap_or_else(|_| models::HardwareDesign::new())
+                } else {
+                    models::HardwareDesign::new()
+                };
+                let elec_dir = ito::resolve_electronics_dir(&root);
+                let new_design = parsers::parse_project_directory(&elec_dir).unwrap_or_else(|_| models::HardwareDesign::new());
+                let has_unsaved = !diff::diff_designs(&old_design, &new_design).is_empty();
+
+                println!("\n{}", format!("Vas a cambiar al hilo «{}» (versión {}).", name, ito::short_hash(&tip)).bold());
+                println!("{}", "Esto trae al directorio de trabajo los archivos de ese hilo.".yellow());
+                if has_unsaved {
+                    println!("{}", "Atención: tenés cambios en electrónica sin commitear que se van a perder.".red().bold());
+                    println!("{}", "Si querés conservarlos, cancelá y guardá con 'ito commit' primero.".dimmed());
+                }
+                print!("¿Continuar? [s/N]: ");
+                io::stdout().flush().ok();
+                let mut answer = String::new();
+                if io::stdin().read_line(&mut answer).is_err() {
+                    println!("{}", "Cancelado.".red());
+                    std::process::exit(1);
+                }
+                let answer = answer.trim().to_lowercase();
+                if answer != "s" && answer != "si" && answer != "sí" {
+                    println!("{}", "Cambio de hilo cancelado.".yellow());
+                    return Ok(());
+                }
+            }
+
+            match ito::run_cambiar(root, name, *con_codigo) {
+                Ok(outcome) => {
+                    println!("\n{}", format!("Listo. Estás en el hilo «{}».", name).green().bold());
+                    if !outcome.restored.is_empty() {
+                        println!("Módulos actualizados:");
+                        for file in &outcome.restored {
+                            println!("  - {}", file.cyan());
+                        }
+                    }
+                    print_firmware_notes(&outcome.firmware);
                 }
                 Err(err) => {
                     println!("{}", format!("Error: {}", err).red().bold());
@@ -1895,6 +2045,39 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Imprime los avisos de firmware/código tras un restore o cambio de hilo. ITO no toca el código
+/// por su cuenta: informa con qué commit de git corresponde la versión y, si el usuario pidió
+/// alinear con --con-codigo, muestra el resultado (o por qué no se pudo).
+fn print_firmware_notes(notes: &[ito::FirmwareNote]) {
+    use colored::Colorize;
+    for note in notes {
+        println!("\n{} (código): ITO no toca tu repositorio de git.", note.module.bold());
+        if note.applied {
+            if let Some(ref target) = note.expected_git {
+                println!("  {} Firmware alineado al commit git {}.", "✔".green().bold(), target.cyan());
+            }
+        } else if let Some(ref reason) = note.blocked_reason {
+            println!("  {} No se alineó el código: {}", "✋".yellow().bold(), reason);
+        } else {
+            match &note.expected_git {
+                Some(target) => {
+                    println!("  Esta versión se guardó con el firmware en el commit git {}.", target.cyan());
+                    if let Some(ref current) = note.current_git {
+                        if current != target {
+                            println!("  Tu código está ahora en {} (distinto).", current.yellow());
+                        }
+                    }
+                    println!("  Para alinearlo vos: en la carpeta del firmware, {}", format!("git checkout {}", target).cyan());
+                    println!("  O que lo haga ITO: repetí el comando con {}", "--con-codigo".cyan());
+                }
+                None => {
+                    println!("  {}", "Esta versión no registró el commit de git del firmware.".dimmed());
+                }
+            }
+        }
+    }
 }
 
 fn parse_shell_words(s: &str) -> Vec<String> {
