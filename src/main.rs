@@ -153,7 +153,7 @@ enum Commands {
         /// Token de API del proyecto, o ID/nombre/URL del proyecto si ya iniciaste sesión
         token_or_project: String,
     },
-    /// Inicia el asistente interactivo para guiar al operador paso a paso (alias de select)
+    /// Muestra una guía rápida: qué es ITO, cómo empezar y el flujo de trabajo básico
     Guia,
     /// Inicia sesión con tus credenciales de ITOGravity (Email y Contraseña)
     Login,
@@ -1308,7 +1308,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Select | Commands::Guia => {
+        Commands::Select => {
             use std::io::{self, Write};
             use colored::Colorize;
 
@@ -1709,6 +1709,68 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        Commands::Guia => {
+            use colored::Colorize;
+
+            // Guía explicativa de primeros pasos. Se adapta un poco al contexto: si estás dentro de
+            // un proyecto, te orienta hacia el flujo diario; si no, hacia cómo empezar uno.
+            let current_dir = std::env::current_dir()?;
+            let inside = ito::find_project_root(&current_dir);
+
+            println!("\n{}", "Guía rápida de ITO".bold());
+            println!("{}", "Control de versiones para ingeniería: electrónica, mecánica, firmware y documentación.".dimmed());
+
+            match &inside {
+                Some(root) => {
+                    let name = {
+                        let ito_json = root.join("ito.json");
+                        std::fs::read_to_string(&ito_json).ok()
+                            .and_then(|c| serde_json::from_str::<models::ItoProjectConfig>(&c).ok())
+                            .map(|cfg| cfg.project_name)
+                            .or_else(|| root.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
+                            .unwrap_or_else(|| "proyecto".to_string())
+                    };
+                    println!("\n{} {}", "Estás dentro del proyecto:".green().bold(), name.cyan().bold());
+                }
+                None => {
+                    println!("\n{}", "No estás dentro de un proyecto de ITO. Arrancá con uno de estos dos caminos:".yellow());
+                }
+            }
+
+            println!("\n{}", "1) Empezar un proyecto".bold());
+            println!("   {}          Inicializa ITO acá mismo, sobre lo que ya tenés (como 'git init'). No mueve nada.", "ito init".cyan());
+            println!("   {}   Crea un proyecto nuevo con la estructura estándar (electronics/, firmware/, …).", "ito new <nombre>".cyan());
+
+            println!("\n{}", "2) El día a día".bold());
+            println!("   {}                    Ver qué módulos cambiaron.", "ito status".cyan());
+            println!("   {}                      Ver el detalle de los cambios (componentes, valores, nets).", "ito diff".cyan());
+            println!("   {}     Guardar una versión.", "ito commit -m \"mensaje\"".cyan());
+            println!("   {}                       Ver el historial de versiones.", "ito log".cyan());
+            println!("   {}          Volver a una versión anterior (usá el hash corto de 'ito log').", "ito restore <hash>".cyan());
+
+            println!("\n{}", "3) Probar sin romper lo bueno (hilos)".bold());
+            println!("   {}        Abrir un hilo nuevo para experimentar.", "ito hilo <nombre>".cyan());
+            println!("   {}     Cambiar de hilo, o volver a 'principal'.", "ito cambiar <nombre>".cyan());
+
+            println!("\n{}", "4) Carpetas propias".bold());
+            println!("   {}      Crear una carpeta y versionarla como un módulo más del proyecto.", "ito folder <nombre>".cyan());
+
+            println!("\n{}", "5) Nube (opcional)".bold());
+            println!("   {}                     Iniciar sesión en ITO Gravity.", "ito login".cyan());
+            println!("   {} / {}             Subir / bajar la última versión del servidor.", "ito push".cyan(), "ito pull".cyan());
+            println!("   {}          Traer un proyecto existente del servidor.", "ito clone <token>".cyan());
+
+            println!("\n{}", "¿Buscás algo puntual?".bold());
+            println!("   {}                    Lista todos los comandos disponibles.", "ito --help".cyan());
+            println!("   {}         Ayuda detallada de un comando concreto.", "ito <comando> --help".cyan());
+            println!("   {}                   Elegir un proyecto del Workspace y entrar.", "ito select".cyan());
+
+            match &inside {
+                Some(_) => println!("\n{} {}", "Sugerencia:".green().bold(), "probá ahora 'ito status' para ver el estado del proyecto.".green()),
+                None => println!("\n{} {}", "Sugerencia:".green().bold(), "entrá a tu carpeta de trabajo y corré 'ito init' para empezar.".green()),
+            }
+            println!();
         }
         Commands::Link => {
             use std::io::{self, Write};
