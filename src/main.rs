@@ -33,8 +33,11 @@ enum AuthSubcommand {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Inicializa un repositorio de Ito en el directorio actual
-    Init,
+    /// Inicializa un repositorio de Ito en el directorio actual (o en la ruta indicada)
+    Init {
+        /// Ruta opcional donde inicializar, como 'git init <dir>'. Si se omite, usa el directorio actual. Se crea si no existe.
+        path: Option<String>,
+    },
     /// Muestra el estado del área de trabajo (BOM, CAD, Firmware)
     Status,
     /// Muestra los cambios semánticos detallados entre versiones
@@ -175,22 +178,46 @@ async fn main() -> Result<()> {
     }
 
     match &cli.command {
-        Commands::Init => {
-            let current_dir = std::env::current_dir()?;
-            let ito_dir = current_dir.join(".ito");
-            
+        Commands::Init { path } => {
+            use colored::Colorize;
+
+            // Resolver el directorio destino: la ruta indicada (como 'git init <dir>') o el actual.
+            // Si se pasa una ruta relativa, se resuelve contra el directorio actual; si no existe, se crea.
+            let target_dir = match path {
+                Some(p) => {
+                    let raw = std::path::PathBuf::from(p.trim().trim_matches('"').trim());
+                    let dir = if raw.is_absolute() {
+                        raw
+                    } else {
+                        std::env::current_dir()?.join(raw)
+                    };
+                    if dir.exists() && !dir.is_dir() {
+                        println!("{}", format!("Error: '{}' ya existe y no es una carpeta.", dir.display()).red().bold());
+                        std::process::exit(1);
+                    }
+                    if !dir.exists() {
+                        std::fs::create_dir_all(&dir)?;
+                        println!("Carpeta creada: {}", dir.display().to_string().cyan());
+                    }
+                    dir
+                }
+                None => std::env::current_dir()?,
+            };
+
+            let ito_dir = target_dir.join(".ito");
             if !ito_dir.exists() {
                 std::fs::create_dir_all(&ito_dir)?;
             }
 
-            let config_path = ito_dir.join("config.toml");
-            if !config_path.exists() {
-                let project_name = current_dir
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("ito-project")
-                    .to_string();
+            let project_name = target_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("ito-project")
+                .to_string();
 
+            let config_path = ito_dir.join("config.toml");
+            let mut newly_initialized = false;
+            if !config_path.exists() {
                 let default_config = Config {
                     project_id: project_name.clone(),
                     remote_url: "https://api.alexandria-hq.com/v1/reports".to_string(),
@@ -199,18 +226,13 @@ async fn main() -> Result<()> {
 
                 let toml_str = toml::to_string_pretty(&default_config)?;
                 std::fs::write(&config_path, toml_str)?;
-                println!("Repositorio Ito inicializado con éxito. Configuración creada en '.ito/config.toml'.");
+                newly_initialized = true;
             } else {
-                println!("El repositorio Ito ya estaba inicializado en este directorio.");
+                println!("{}", "El repositorio Ito ya estaba inicializado en este directorio.".yellow());
             }
 
-            let ito_json_path = current_dir.join("ito.json");
+            let ito_json_path = target_dir.join("ito.json");
             if !ito_json_path.exists() {
-                let project_name = current_dir
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("ito-project")
-                    .to_string();
                 let project_uuid = uuid::Uuid::new_v4().to_string();
                 let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 let created_by = std::env::var("USER")
@@ -218,7 +240,7 @@ async fn main() -> Result<()> {
                     .unwrap_or_else(|_| "unknown".to_string());
                 let config = models::ItoProjectConfig {
                     format_version: "1.0".to_string(),
-                    project_name,
+                    project_name: project_name.clone(),
                     project_uuid,
                     created_at,
                     created_by,
@@ -230,8 +252,25 @@ async fn main() -> Result<()> {
                 };
                 if let Ok(json_content) = serde_json::to_string_pretty(&config) {
                     let _ = std::fs::write(&ito_json_path, json_content);
-                    println!("Archivo 'ito.json' creado en la raíz del proyecto.");
                 }
+            }
+
+            if newly_initialized {
+                println!("\n{}", "Repositorio Ito inicializado con éxito.".green().bold());
+                println!("Proyecto: {}", project_name.cyan().bold());
+                println!("Ubicación: {}", target_dir.display().to_string().cyan());
+                println!("{}", "Tus archivos no se movieron: ITO versiona lo que ya está en esta carpeta.".dimmed());
+                println!("\n{}", "Siguientes pasos:".bold());
+                if path.is_some() {
+                    println!("  1. Entrá a la carpeta:      {}", format!("cd \"{}\"", target_dir.display()).cyan());
+                    println!("  2. Poné (o dejá) tus archivos de diseño ahí adentro.");
+                    println!("  3. Guardá la primera versión: {}", "ito commit -m \"primera versión\"".cyan());
+                } else {
+                    println!("  1. Poné (o dejá) tus archivos de diseño en esta carpeta.");
+                    println!("  2. Guardá la primera versión: {}", "ito commit -m \"primera versión\"".cyan());
+                }
+                println!("\n{}", "Note: ¿Preferís empezar con la estructura de carpetas estándar de ITO (firmware/, electronics/, …)? Usá:".dimmed());
+                println!("      {}", "ito new <NombreProyecto>".cyan());
             }
         }
         Commands::Status => {
