@@ -3,7 +3,7 @@
 
 [Setup]
 AppName=ITO
-AppVersion=0.3.8
+AppVersion=0.3.9
 AppPublisher=ITO Gravity Team
 AppPublisherURL=https://github.com/ITO-Gravity
 DefaultDirName={autopf}\ITO
